@@ -1,5 +1,5 @@
-import { RecoilRoot, useRecoilCallback } from 'recoil';
 import { renderHook, act } from '@testing-library/react';
+import { RecoilRoot, useRecoilCallback, useRecoilValue } from 'recoil';
 import {
   Constants,
   StepTypes,
@@ -15,9 +15,11 @@ import type {
   TConversation,
   TMessage,
   SubagentUpdateEvent,
+  ResponseProgress,
   Agents,
 } from 'librechat-data-provider';
 import { subagentProgressByToolCallId } from '~/store/subagents';
+import { responseProgressByMessageId } from '~/store/progress';
 import useStepHandler from '~/hooks/SSE/useStepHandler';
 
 /** `Constants` is a heterogeneous enum (`string | number`); annotate as
@@ -58,6 +60,43 @@ describe('useStepHandler', () => {
     announcePolite: mockAnnouncePolite,
     lastAnnouncementTimeRef: mockLastAnnouncementTimeRef,
     onSkillAuthoringComplete: mockOnSkillAuthoringComplete,
+  });
+
+  it('keeps the latest progress snapshot on replay and clears it on conversation switch', () => {
+    const { result } = renderHook(
+      () => ({
+        ...useStepHandler(createHookParams()),
+        progress: useRecoilValue(responseProgressByMessageId('response-msg-1')),
+        placeholderProgress: useRecoilValue(responseProgressByMessageId('user-msg-1')),
+      }),
+      { wrapper: RecoilRoot },
+    );
+    const data: ResponseProgress = {
+      messageId: 'response-msg-1_',
+      sequence: 2,
+      status: 'running',
+      startedAt: 1000,
+      updatedAt: 2000,
+      steps: [{ stage: 'executing', startedAt: 1000 }],
+    };
+    act(() =>
+      result.current.stepHandler(
+        { event: StepEvents.ON_RESPONSE_PROGRESS, data },
+        createSubmission(),
+      ),
+    );
+    act(() =>
+      result.current.stepHandler(
+        { event: StepEvents.ON_RESPONSE_PROGRESS, data: { ...data, sequence: 1 } },
+        createSubmission(),
+      ),
+    );
+    expect(result.current.progress?.sequence).toBe(2);
+    expect(result.current.placeholderProgress).toEqual(result.current.progress);
+    act(() => result.current.clearStepMaps());
+    expect(result.current.progress?.sequence).toBe(2);
+    act(() => result.current.resetSubagentAtoms());
+    expect(result.current.progress).toBeUndefined();
   });
 
   const createUserMessage = (overrides: Partial<TMessage> = {}): TMessage => ({

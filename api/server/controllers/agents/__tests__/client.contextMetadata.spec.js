@@ -34,8 +34,9 @@ const primaryFor = (runId, output_tokens) => ({
   runId,
 });
 
-function buildMeta({ snap, latestUsageIndex, usageEvents }) {
+function buildMeta({ snap, latestUsageIndex, usageEvents, responseProgress }) {
   const self = {
+    options: { responseProgress },
     collectedThoughtSignatures: null,
     usageEmitSink: usageEvents,
     contextUsageSink: snap
@@ -46,6 +47,19 @@ function buildMeta({ snap, latestUsageIndex, usageEvents }) {
 }
 
 describe('AgentClient.buildResponseMetadata — snapshot persistence + summary marker', () => {
+  it('persists the progress tracker snapshot with the response', () => {
+    const progress = {
+      messageId: 'response-1',
+      sequence: 3,
+      status: 'completed',
+      startedAt: 1000,
+      endedAt: 4000,
+    };
+    expect(buildMeta({ responseProgress: { snapshot: () => progress } }).responseProgress).toEqual(
+      progress,
+    );
+  });
+
   it('persists the snapshot when a primary usage follows it (normal turn)', () => {
     const meta = buildMeta({ snap: snapshot(0), latestUsageIndex: 0, usageEvents: [primary] });
     expect(meta.contextUsage).toBeDefined();

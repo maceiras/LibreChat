@@ -6,6 +6,7 @@ import type { TMessageProps, TMessageIcon, TMessageChatContext } from '~/common'
 import { useAttachments, useLocalize, useMessageActions, useContentMetadata } from '~/hooks';
 import { cn, getHeaderPrefixForScreenReader, getMessageAriaLabel } from '~/utils';
 import MessageTimestamp from '~/components/Chat/Messages/ui/MessageTimestamp';
+import ResponseProgress from '~/components/Chat/Messages/ui/ResponseProgress';
 import ContentParts from '~/components/Chat/Messages/Content/ContentParts';
 import PlaceholderRow from '~/components/Chat/Messages/ui/PlaceholderRow';
 import SiblingSwitch from '~/components/Chat/Messages/SiblingSwitch';
@@ -76,6 +77,7 @@ function areContentRenderPropsEqual(prev: ContentRenderProps, next: ContentRende
     prevMsg.isCreatedByUser === nextMsg.isCreatedByUser &&
     (prevMsg.children?.length ?? 0) === (nextMsg.children?.length ?? 0) &&
     prevMsg.content === nextMsg.content &&
+    prevMsg.metadata?.responseProgress === nextMsg.metadata?.responseProgress &&
     prevMsg.model === nextMsg.model &&
     prevMsg.endpoint === nextMsg.endpoint &&
     prevMsg.iconURL === nextMsg.iconURL &&
@@ -214,6 +216,13 @@ const ContentRender = memo(function ContentRender({
 
         <div className="flex flex-col gap-1">
           <div className="flex min-h-[20px] max-w-full flex-grow flex-col gap-0">
+            {!msg.isCreatedByUser && !edit && (
+              <ResponseProgress
+                messageId={msg.messageId}
+                persisted={msg.metadata?.responseProgress}
+                isSubmitting={isSubmitting}
+              />
+            )}
             <ContentParts
               edit={edit}
               isLast={isLast}

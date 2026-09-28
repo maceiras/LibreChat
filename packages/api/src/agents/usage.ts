@@ -7,6 +7,7 @@ import {
 import type {
   TCustomConfig,
   TResponseUsage,
+  ResponseProgress,
   TTokenUsageEvent,
   TContextUsageEvent,
   TTransactionsConfig,
@@ -26,6 +27,7 @@ import {
   bulkWriteTransactions,
   prepareTokenSpend,
 } from './transactions';
+import { readAbortedResponseProgress } from './progress';
 
 type SpendTokensFn = (txData: TxMetadata, tokenUsage: TokenUsage) => Promise<unknown>;
 type SpendStructuredTokensFn = (
@@ -424,8 +426,13 @@ function parseUsageEvents(value?: string | null): TTokenUsageEvent[] {
  * partial answer text on top (no overlap to cancel).
  */
 export function buildAbortedResponseMetadata(
-  job: { tokenUsage?: string | null; contextUsage?: string | null } | null | undefined,
-): { usage?: TResponseUsage; summaryUsedTokens?: number } | undefined {
+  job:
+    | { tokenUsage?: string | null; contextUsage?: string | null; replayEvents?: string | null }
+    | null
+    | undefined,
+):
+  | { usage?: TResponseUsage; summaryUsedTokens?: number; responseProgress?: ResponseProgress }
+  | undefined {
   const events = parseUsageEvents(job?.tokenUsage);
   const usage = aggregateEmittedUsage(events);
 
@@ -442,7 +449,13 @@ export function buildAbortedResponseMetadata(
    *  marker and the client's partial-text addition has no overlap to cancel. */
   const summaryUsedTokens = computeSummaryUsedTokens(snapshot);
 
-  const metadata: { usage?: TResponseUsage; summaryUsedTokens?: number } = {};
+  const metadata: {
+    usage?: TResponseUsage;
+    summaryUsedTokens?: number;
+    responseProgress?: ResponseProgress;
+  } = {};
+  const progress = readAbortedResponseProgress(job?.replayEvents);
+  if (progress) metadata.responseProgress = progress;
   if (usage) {
     metadata.usage = usage;
   }

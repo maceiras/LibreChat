@@ -1,4 +1,17 @@
 {
+  "com_ui_progress_preparing": "Preparing response",
+  "com_ui_progress_searching": "Searching the web",
+  "com_ui_progress_coding": "Writing Python code",
+  "com_ui_progress_executing": "Running Python",
+  "com_ui_progress_responding": "Writing response",
+  "com_ui_progress_files": "Retrieving generated files",
+  "com_ui_progress_completed": "Completed",
+  "com_ui_progress_failed": "Failed",
+  "com_ui_progress_cancelled": "Stopped",
+  "com_ui_progress_incomplete": "Partially completed",
+  "com_ui_progress_elapsed": "Elapsed time",
+  "com_ui_progress_steps": "Response steps",
+
   "chat_direction_left_to_right": "Left to Right",
   "chat_direction_right_to_left": "Right to Left",
   "com_a11y_ai_composing": "The AI is still composing.",

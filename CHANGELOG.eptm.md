@@ -40,6 +40,26 @@ between conversation turns by this integration.
 
 - **Documentation**: add this changelog and guidelines for keeping it up to date.
 
+## 2026-09-28 — Native Responses progress
+
+- Show real OpenAI Responses stages (web search, code preparation, Python execution,
+  response writing, and local file retrieval) with elapsed time. Keep completed
+  replies compact with an expandable history and frozen duration.
+- Observe native SSE status events before the LangChain adapter discards them,
+  preserving the configured transport and original response bytes. Do not expose
+  generated code or raw provider payloads. This covers the primary Responses agent;
+  endpoints that do not emit native status events keep their existing behavior.
+- Preserve progress during reconnection and after reload, including stopped replies.
+  Show it on the assistant placeholder before the first text arrives; ignore stale
+  replay events and distinguish failure, interruption, and incomplete file retrieval.
+- Validation: 249 targeted tests passed across progress tracking, the real SDK,
+  file retrieval, replay, metadata persistence, SSE handling, and the progress UI.
+  API/frontend TypeScript, changed-file ESLint, and production Docker builds passed.
+  The local API was rebuilt and restarted. A live Matplotlib request produced an
+  inline PNG and persisted its real stages (31 seconds). It exposed a missing
+  connection to the main message renderer, which was corrected. Final visual
+  verification was blocked by the browser-control runtime failing to start.
+
 ## 2026-09-28 — Automatic document uploads and MIME routing
 
 - **Provider MIME routing**: honor explicit provider MIME allowlists for all

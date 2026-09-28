@@ -84,6 +84,8 @@ describe('Responses container files', () => {
       return document.toObject();
     });
     const onFile = jest.fn();
+    const onProgress = jest.fn();
+    const onError = jest.fn();
     const previousHandler = { handle: jest.fn() };
     const expiredAt = new Date('2026-10-01');
     const getStrategyFunctions = jest.fn((_source: string) => ({ saveBuffer }));
@@ -93,6 +95,8 @@ describe('Responses container files', () => {
       handler: previousHandler,
       createFile,
       onFile,
+      onProgress,
+      onError,
       getStrategyFunctions,
       getRetentionExpiry: async () => ({ expiredAt }),
     });
@@ -108,6 +112,8 @@ describe('Responses container files', () => {
       invoke,
       createFile,
       onFile,
+      onProgress,
+      onError,
       saveBuffer,
       getStrategyFunctions,
       previousHandler,
@@ -121,6 +127,11 @@ describe('Responses container files', () => {
     await test.invoke();
     expect(test.previousHandler.handle).toHaveBeenCalledTimes(2);
     expect(test.fetch).toHaveBeenCalledTimes(1);
+    expect(test.onProgress).toHaveBeenCalledTimes(1);
+    expect(test.onError).not.toHaveBeenCalled();
+    expect(test.onProgress.mock.invocationCallOrder[0]).toBeLessThan(
+      test.fetch.mock.invocationCallOrder[0],
+    );
     const [url, init] = test.fetch.mock.calls[0];
     expect(String(url)).toBe(
       'https://openai.example/v1/containers/cntr_test/files/cfile_test/content',

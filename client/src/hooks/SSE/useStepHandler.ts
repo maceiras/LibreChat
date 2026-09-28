@@ -7,6 +7,7 @@ import {
   ContentTypes,
   ToolCallTypes,
   getNonEmptyValue,
+  responseProgressSchema,
 } from 'librechat-data-provider';
 import type {
   Agents,
@@ -17,6 +18,7 @@ import type {
   SummaryContentPart,
   TMessageContentParts,
   SubagentUpdateEvent,
+  ResponseProgress,
 } from 'librechat-data-provider';
 import type { SetterOrUpdater } from 'recoil';
 import type { AnnounceOptions } from '~/common';
@@ -26,6 +28,7 @@ import {
   initSubagentAggregatorState,
   initSubagentTickerState,
 } from '~/utils/subagentContent';
+import { responseProgressByMessageId, latestResponseProgress } from '~/store/progress';
 import { subagentProgressByToolCallId } from '~/store';
 import { MESSAGE_UPDATE_INTERVAL } from '~/common';
 
@@ -54,7 +57,8 @@ type TStepEvent =
   | { event: StepEvents.ON_SUMMARIZE_START; data: Agents.SummarizeStartEvent }
   | { event: StepEvents.ON_SUMMARIZE_DELTA; data: Agents.SummarizeDeltaEvent }
   | { event: StepEvents.ON_SUMMARIZE_COMPLETE; data: Agents.SummarizeCompleteEvent }
-  | { event: StepEvents.ON_SUBAGENT_UPDATE; data: SubagentUpdateEvent };
+  | { event: StepEvents.ON_SUBAGENT_UPDATE; data: SubagentUpdateEvent }
+  | { event: StepEvents.ON_RESPONSE_PROGRESS; data: ResponseProgress };
 
 type MessageDeltaUpdate = { type: ContentTypes.TEXT; text: string; tool_call_ids?: string[] };
 
@@ -146,6 +150,27 @@ export default function useStepHandler({
    * `atomFamily` — atoms persist for the app lifetime.
    */
   const knownSubagentAtomKeys = useRef(new Set<string>());
+  const knownProgressAtomKeys = useRef(new Set<string>());
+  const applyResponseProgress = useRecoilCallback(
+    ({ set }) =>
+      (data: ResponseProgress, placeholderId?: string) => {
+        const result = responseProgressSchema.safeParse(data);
+        if (!result.success) return;
+        /** Before the first content event, the assistant still uses the user-ID placeholder. */
+        const keys = new Set(
+          [result.data.messageId, placeholderId]
+            .filter((id): id is string => !!id)
+            .map((id) => id.replace(/_+$/, '')),
+        );
+        for (const key of keys) {
+          knownProgressAtomKeys.current.add(key);
+          set(responseProgressByMessageId(key), (previous) =>
+            latestResponseProgress(result.data, previous),
+          );
+        }
+      },
+    [],
+  );
 
   const getCurrentMessages = useCallback(
     (messages: TMessage[]) => {
@@ -279,6 +304,8 @@ export default function useStepHandler({
           reset(subagentProgressByToolCallId(toolCallId));
         }
         knownSubagentAtomKeys.current.clear();
+        for (const key of knownProgressAtomKeys.current) reset(responseProgressByMessageId(key));
+        knownProgressAtomKeys.current.clear();
       },
     [],
   );
@@ -479,6 +506,15 @@ export default function useStepHandler({
 
   const stepHandler = useCallback(
     (stepEvent: TStepEvent, submission: EventSubmission) => {
+      if (stepEvent.event === StepEvents.ON_RESPONSE_PROGRESS) {
+        applyResponseProgress(
+          stepEvent.data,
+          submission.isRegenerate
+            ? submission.initialResponse?.messageId
+            : submission.userMessage?.messageId,
+        );
+        return;
+      }
       const submissionMessages = submission.messages ?? [];
       const getEventMessages = (candidateMessages: TMessage[]) =>
         submission.isRegenerate ? candidateMessages : getCurrentMessages(candidateMessages);
@@ -1068,6 +1104,7 @@ export default function useStepHandler({
       calculateContentIndex,
       getCurrentMessages,
       applySubagentUpdate,
+      applyResponseProgress,
       onSkillAuthoringComplete,
     ],
   );

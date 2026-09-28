@@ -1958,6 +1958,32 @@ describe('priorRunOutputTokens', () => {
 });
 
 describe('buildAbortedResponseMetadata', () => {
+  it('persists cancelled progress from replay state on a different replica', () => {
+    const replayEvents = JSON.stringify([
+      {
+        event: 'on_response_progress',
+        data: {
+          messageId: 'response-1',
+          sequence: 2,
+          startedAt: 1000,
+          updatedAt: 3000,
+          status: 'running',
+          steps: [{ stage: 'executing', startedAt: 1000 }],
+        },
+      },
+    ]);
+    const before = Date.now();
+    const result = buildAbortedResponseMetadata({ replayEvents });
+    expect(result?.responseProgress).toMatchObject({
+      status: 'cancelled',
+      sequence: 3,
+      messageId: 'response-1',
+    });
+    expect(result?.responseProgress?.endedAt).toBeGreaterThanOrEqual(before);
+    expect(result?.responseProgress?.steps[0].endedAt).toBe(result?.responseProgress?.endedAt);
+    expect(buildAbortedResponseMetadata({ replayEvents: 'invalid JSON' })).toBeUndefined();
+  });
+
   it('returns undefined for an empty job', () => {
     expect(buildAbortedResponseMetadata(undefined)).toBeUndefined();
     expect(buildAbortedResponseMetadata({})).toBeUndefined();

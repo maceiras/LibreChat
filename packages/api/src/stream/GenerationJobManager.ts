@@ -57,6 +57,10 @@ function getReplayStepId(event: t.ServerSentEvent): unknown {
     return undefined;
   }
 
+  if (event.event === 'on_response_progress') {
+    return 'messageId' in event.data ? event.data.messageId : undefined;
+  }
+
   if (event.event === 'on_run_step' || event.event === 'on_run_step_delta') {
     return 'id' in event.data ? event.data.id : undefined;
   }
@@ -1224,7 +1228,10 @@ class GenerationJobManagerClass {
    * UI state on resume but are not represented by aggregated message content.
    */
   private async trackReplayEvent(streamId: string, event: t.ServerSentEvent): Promise<void> {
-    if (!isOAuthReplayEvent(event)) {
+    if (
+      !isOAuthReplayEvent(event) &&
+      !('event' in event && event.event === 'on_response_progress')
+    ) {
       return;
     }
 

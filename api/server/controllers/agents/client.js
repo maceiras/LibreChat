@@ -3,6 +3,7 @@ const { logger } = require('@librechat/data-schemas');
 const { getBufferString, HumanMessage } = require('@librechat/agents/langchain/messages');
 const {
   createRun,
+  withResponseProgress,
   isEnabled,
   checkAccess,
   buildToolSet,
@@ -913,6 +914,7 @@ class AgentClient extends BaseClient {
    * @returns {{
    *   thoughtSignatures?: Record<string, string>,
    *   contextUsage?: import('librechat-data-provider').TContextUsageEvent,
+   *   responseProgress?: import('librechat-data-provider').ResponseProgress,
    *   usage?: import('librechat-data-provider').TResponseUsage,
    * } | undefined}
    */
@@ -920,9 +922,12 @@ class AgentClient extends BaseClient {
     /** @type {{
      *   thoughtSignatures?: Record<string, string>,
      *   contextUsage?: import('librechat-data-provider').TContextUsageEvent,
+     *   responseProgress?: import('librechat-data-provider').ResponseProgress,
      *   usage?: import('librechat-data-provider').TResponseUsage,
      * }} */
     const metadata = {};
+    const responseProgress = this.options?.responseProgress?.snapshot();
+    if (responseProgress) metadata.responseProgress = responseProgress;
     const signatures = this.collectedThoughtSignatures;
     if (signatures && Object.keys(signatures).length > 0) {
       metadata.thoughtSignatures = signatures;
@@ -1323,7 +1328,16 @@ class AgentClient extends BaseClient {
        * @param {BaseMessage[]} messages
        */
       const runAgents = async (messages) => {
-        const agents = [this.options.agent];
+        const agents = [
+          this.options.responseProgress
+            ? withResponseProgress(
+                this.options.agent,
+                this.options.responseProgress,
+                this.responseMessageId,
+                abortController.signal,
+              )
+            : this.options.agent,
+        ];
         // Include additional agents when:
         // - agentConfigs has agents (from addedConvo parallel execution or agent handoffs)
         // - Agents without incoming edges become start nodes and run in parallel automatically
@@ -1489,6 +1503,9 @@ class AgentClient extends BaseClient {
         });
       }
     } catch (err) {
+      await this.options.responseProgress?.finish(
+        abortController.signal.aborted ? 'cancelled' : 'failed',
+      );
       if (abortController.signal.aborted) {
         logger.debug(
           '[api/server/controllers/agents/client.js #sendCompletion] Operation aborted by user',
@@ -1505,6 +1522,9 @@ class AgentClient extends BaseClient {
         });
       }
     } finally {
+      await this.options.responseProgress?.finish(
+        abortController.signal.aborted ? 'cancelled' : 'completed',
+      );
       /** Capture calibration state from the run for persistence on the response message.
        *  Runs in finally so values are captured even on abort. */
       const ratio = this.run?.getCalibrationRatio() ?? 0;

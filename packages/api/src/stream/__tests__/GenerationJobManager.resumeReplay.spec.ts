@@ -49,6 +49,26 @@ describe('GenerationJobManager resume replay events', () => {
     manager = undefined;
   });
 
+  test('replays only the latest response progress snapshot without duplicating its history', async () => {
+    manager = createSnapshotReplayManager();
+    const streamId = 'response-progress-resume';
+    await manager.createJob(streamId, 'user-1', streamId);
+    const snapshots: ServerSentEvent[] = [1, 2, 3].map((sequence) => ({
+      event: 'on_response_progress',
+      data: {
+        messageId: 'response-1',
+        sequence,
+        status: 'running',
+        startedAt: 1000,
+        updatedAt: sequence * 1000,
+        steps: [{ stage: 'executing', startedAt: 1000 }],
+      },
+    }));
+    await Promise.all(snapshots.map((event) => manager!.emitChunk(streamId, event)));
+    const resumed = await manager.getResumeState(streamId);
+    expect(resumed?.replayEvents).toEqual([snapshots[2]]);
+  });
+
   test('includes OAuth run step and delta replay events in resume state', async () => {
     manager = createInMemoryManager();
     const streamId = `oauth-delta-resume-${Date.now()}`;

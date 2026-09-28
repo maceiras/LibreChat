@@ -40,6 +40,7 @@ export enum StepEvents {
   ON_SUMMARIZE_DELTA = 'on_summarize_delta',
   ON_SUMMARIZE_COMPLETE = 'on_summarize_complete',
   ON_SUBAGENT_UPDATE = 'on_subagent_update',
+  ON_RESPONSE_PROGRESS = 'on_response_progress',
 }
 
 /** Token-tracking event names streamed to the client (separate from StepEvents dispatch). */

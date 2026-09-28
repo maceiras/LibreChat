@@ -50,6 +50,8 @@ interface OpenAIFileHandlerOptions {
   req: ServerRequest;
   handler: EventHandler;
   imageSource?: string;
+  onProgress?: () => void | Promise<void>;
+  onError?: () => void | Promise<void>;
   getStrategyFunctions: (source: string) => { saveBuffer?: SaveBufferFn };
   createFile: (file: Partial<IMongoFile>, disableTTL?: boolean) => Promise<IMongoFile | null>;
   getRetentionExpiry: (req: ServerRequest) => Promise<RetentionExpiry>;
@@ -127,6 +129,8 @@ export function createOpenAIFileHandler({
   req,
   handler,
   imageSource,
+  onProgress,
+  onError,
   onFile,
   createFile,
   getStrategyFunctions,
@@ -168,6 +172,7 @@ export function createOpenAIFileHandler({
         }
         processed.add(key);
         try {
+          await onProgress?.();
           const timeout = AbortSignal.timeout(30_000);
           const response = await client.containers.files.content.retrieve(
             citation.file_id,
@@ -224,6 +229,7 @@ export function createOpenAIFileHandler({
           }
           await onFile(file);
         } catch (error) {
+          await onError?.();
           processed.delete(key);
           logger.error('[OpenAI Code Interpreter] Failed to save output file', error);
         }

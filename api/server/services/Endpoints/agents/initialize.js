@@ -3,6 +3,7 @@ const { createContentAggregator } = require('@librechat/agents');
 const {
   loadSkillStates,
   initializeAgent,
+  createResponseProgress,
   primeInvokedSkills,
   validateAgentModel,
   extractManualSkills,
@@ -16,6 +17,7 @@ const {
 } = require('@librechat/api');
 const {
   ResourceType,
+  StepEvents,
   EModelEndpoint,
   PermissionBits,
   MAX_SUBAGENT_DEPTH,
@@ -26,6 +28,7 @@ const {
   isEphemeralAgentId,
 } = require('librechat-data-provider');
 const {
+  emitEvent,
   createToolEndCallback,
   getDefaultHandlers,
 } = require('~/server/controllers/agents/callbacks');
@@ -264,6 +267,10 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
   /** @type {Array<import('librechat-data-provider').TTokenUsageEvent>} */
   const usageEmitSink = [];
 
+  const responseProgress = createResponseProgress((data) =>
+    emitEvent(res, streamId, { event: StepEvents.ON_RESPONSE_PROGRESS, data }),
+  );
+
   const eventHandlers = getDefaultHandlers({
     res,
     artifactPromises,
@@ -273,6 +280,8 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
       getRetentionExpiry,
       createFile: db.createFile,
       imageSource: getFileStrategy(req.config, { isImage: true }),
+      onProgress: () => responseProgress.stage('files'),
+      onError: () => responseProgress.finish('incomplete'),
     },
     toolExecuteOptions,
     summarizationOptions,
@@ -950,6 +959,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     aggregateContent,
     artifactPromises,
     primeInvokedSkills: handlePrimeInvokedSkills,
+    responseProgress,
     agent: primaryConfig,
     spec: endpointOption.spec,
     iconURL: endpointOption.iconURL,

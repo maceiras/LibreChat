@@ -1228,6 +1228,7 @@ function buildSummarizationHandlers({ isStreaming, res }) {
 }
 
 module.exports = {
+  emitEvent,
   ModelEndHandler,
   agentLogHandler,
   agentLogHandlerObj,
