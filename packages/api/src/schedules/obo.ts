@@ -1,15 +1,16 @@
-import { logger, getTenantId } from '@librechat/data-schemas';
 import { Permissions, PermissionTypes } from 'librechat-data-provider';
+import { logger, getTenantId, isRuntimeDisabled } from '@librechat/data-schemas';
 import type { IUser, TokenMethods, AppConfig } from '@librechat/data-schemas';
 import type { Response } from 'express';
 import type { HostUpstreamTokenProviderResolver } from './mcp';
 import type { UpstreamTokenTarget } from '../mcp/oauth/obo';
+import type { GetAppConfigOptions } from '../app/service';
 import type { MCPOAuthTokens } from '../mcp/oauth/types';
 import type { FlowStateManager } from '../flow/manager';
 import type { ParsedServerConfig } from '../mcp/types';
 import type { ScheduledTokenContext } from './context';
+import type { ScheduleMCPPreflight } from './types';
 import type { ServerRequest } from '../types/http';
-import type { ScheduleLimits } from './types';
 import {
   MCPTokenStorage,
   getMCPOAuthLeaseId,
@@ -19,6 +20,7 @@ import {
 import { OboTokenResolutionError, isRetryableOboExchangeError } from '../mcp/oauth/obo';
 import { getAppConfigOptionsFromUser } from '../app/service';
 import { checkAccess } from '../middleware/access';
+import { isEnabled } from '../utils/common';
 import { ScheduleMCPError } from './mcp';
 
 interface ScheduleGrantRow {
@@ -56,10 +58,7 @@ interface GrantDeps {
   flowManager: Pick<FlowStateManager<MCPOAuthTokens | null>, 'getLeaseGeneration' | 'acquireLease'>;
   getUser: (id: string) => Promise<IUser | null>;
   getSchedule: (id: string, userId: string) => Promise<ScheduleGrantRow | null>;
-  getLimits: (user: IUser) => Promise<ScheduleLimits>;
-  getAppConfig: (
-    options: ReturnType<typeof getAppConfigOptionsFromUser> & { failClosed: true },
-  ) => Promise<AppConfig | undefined>;
+  getAppConfig: (options: GetAppConfigOptions) => Promise<AppConfig | undefined>;
   ensureConfigServers: (
     config: NonNullable<AppConfig['mcpConfig']>,
   ) => Promise<Record<string, ParsedServerConfig>>;
@@ -75,14 +74,14 @@ interface GrantDeps {
     grantType: string,
     parameters: Record<string, string>,
   ) => Promise<GrantResponse>;
-  inspect: (
+  inspect?: (
     agentId: string,
     user: IUser,
     scheduleId: string,
     serverName: string,
     onSelected: (config: ParsedServerConfig) => Promise<void>,
   ) => Promise<void>;
-  isOwnerDeleting: (id: string) => Promise<boolean>;
+  isOwnerActive: (id: string) => Promise<boolean>;
   pauseSchedule: (
     scheduleId: string,
     userId: string,
@@ -133,10 +132,44 @@ export interface ScheduledOboGrantService {
   describeFromRequest: (req: ServerRequest, res: Response) => Promise<void>;
   revokeFromRequest: (req: ServerRequest, res: Response) => Promise<void>;
   purge: (userId: string, scheduleId: string) => Promise<void>;
+  setInspector: (preflight: ScheduleMCPPreflight) => void;
 }
 
 export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGrantService {
   const { tokens } = deps;
+  let inspect = deps.inspect;
+  const setInspector = (preflight: ScheduleMCPPreflight): void => {
+    inspect = async (agentId, user, scheduleId, serverName, onSelected) => {
+      await preflight(agentId, user, {
+        scheduleId,
+        concurrency: 3,
+        inspectOboTarget: { serverName, onSelected },
+      });
+    };
+  };
+  const inspectTarget: NonNullable<GrantDeps['inspect']> = async (...args) => {
+    if (!inspect) throw new Error('Scheduled OBO inspector is not installed');
+    return inspect(...args);
+  };
+
+  const getPolicy = async (user: IUser) => {
+    const [app, base] = await Promise.all([
+      deps.getAppConfig({ ...getAppConfigOptionsFromUser(user), failClosed: true }),
+      deps.getAppConfig({ baseOnly: true, failClosed: true }),
+    ]);
+    const policy = app?.interfaceConfig?.schedules;
+    const active =
+      base != null &&
+      !isRuntimeDisabled(base.interfaceConfig?.schedules) &&
+      !isEnabled(process.env.SCHEDULES_DISABLED) &&
+      policy != null &&
+      policy !== false &&
+      (policy === true || policy.use !== false);
+    return {
+      enabled: active,
+      oboServers: policy && typeof policy === 'object' ? policy.oboServers : undefined,
+    };
+  };
   const getProvider = (): GrantProvider | null => {
     const config = deps.getOpenIdConfig();
     if (!config) return null;
@@ -178,13 +211,13 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
     allowDisabled = false,
   ) => {
     if (context.ownerId !== userId || context.invocationMode !== 'delegated') throw missingGrant();
-    const [user, schedule, deleting] = await Promise.all([
+    const [user, schedule, ownerActive] = await Promise.all([
       deps.getUser(userId),
       deps.getSchedule(context.scheduleId, userId),
-      deps.isOwnerDeleting(userId),
+      deps.isOwnerActive(userId),
     ]);
     if (
-      deleting ||
+      !ownerActive ||
       !user ||
       !schedule ||
       String(schedule.user) !== userId ||
@@ -199,7 +232,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
     if (user.id && user.id !== userId) throw missingGrant();
     user.id = userId;
     const [limits, mcpAccess, scheduleAccess, agentAccess, config] = await Promise.all([
-      deps.getLimits(user),
+      getPolicy(user),
       checkAccess({
         user,
         permissionType: PermissionTypes.MCP_SERVERS,
@@ -411,7 +444,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
       agentId: schedule.agent_id,
       invocationMode: 'delegated',
     };
-    await deps.inspect(schedule.agent_id, user, scheduleId, serverName, async (selected) => {
+    await inspectTarget(schedule.agent_id, user, scheduleId, serverName, async (selected) => {
       if (
         !selected.obo?.scopes ||
         (expectedScopes != null && selected.obo.scopes !== expectedScopes)
@@ -622,7 +655,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
       ]);
       if (!user || !schedule || String(schedule.user) !== userId) throw missingGrant();
       user.id = userId;
-      await deps.inspect(schedule.agent_id, user, scheduleId, serverName, async (selected) => {
+      await inspectTarget(schedule.agent_id, user, scheduleId, serverName, async (selected) => {
         if (!selected.obo?.scopes) throw missingGrant();
         const context: ScheduledTokenContext = {
           scheduleId,
@@ -688,5 +721,6 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
     describeFromRequest,
     revokeFromRequest,
     purge,
+    setInspector,
   };
 }

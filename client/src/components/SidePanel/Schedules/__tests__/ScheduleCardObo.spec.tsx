@@ -2,10 +2,10 @@ import { createElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '@librechat/client';
 import userEvent from '@testing-library/user-event';
+import { dataService } from 'librechat-data-provider';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import type { TSchedule } from 'librechat-data-provider';
 import type { ReactNode } from 'react';
-import { dataService } from 'librechat-data-provider';
 import ScheduleCard from '../ScheduleCard';
 
 const mockAuthorize = jest.fn();

@@ -5,8 +5,8 @@ import type { Response } from 'express';
 import type { ParsedServerConfig } from '../mcp/types';
 import type { ServerRequest } from '../types/http';
 import { InMemoryTokenStore, MockKeyv } from '../mcp/__tests__/helpers/oauthTestServer';
-import { createScheduledOboGrantService } from './obo';
 import { OboTokenResolutionError, resolveOboToken } from '../mcp/oauth/obo';
+import { createScheduledOboGrantService } from './obo';
 import { FlowStateManager } from '../flow/manager';
 
 jest.mock('@librechat/data-schemas', () => ({
@@ -55,7 +55,7 @@ function harness() {
     async (
       _config: unknown,
       grantType: string,
-      params: Record<string, string>,
+      _params: Record<string, string>,
     ): Promise<{
       access_token: string;
       refresh_token?: string;
@@ -73,19 +73,11 @@ function harness() {
     flowManager: flow,
     getUser: async () => user,
     getSchedule: async () => row,
-    getLimits: async () => ({
-      enabled: true,
-      maxPerUser: 10,
-      minIntervalMinutes: 60,
-      admissionConcurrency: 10,
-      fireConcurrency: 5,
-      autoDisableAfterFailures: 5,
-      mcpPreflightConcurrency: 3,
-      mcpPreflightTimeoutMs: 60000,
-      requireProject: false,
-      oboServers: allowed,
-    }),
-    getAppConfig: async () => ({ mcpConfig: { Files: server } }) as Partial<AppConfig> as AppConfig,
+    getAppConfig: async () =>
+      ({
+        mcpConfig: { Files: server },
+        interfaceConfig: { schedules: { use: true, oboServers: allowed } },
+      }) as Partial<AppConfig> as AppConfig,
     ensureConfigServers: async () => ({ Files: server }),
     getServerConfigs: async () => ({ Files: server }),
     getRoleByName: async () =>
@@ -106,7 +98,7 @@ function harness() {
     }),
     requestGrant,
     inspect,
-    isOwnerDeleting: async () => false,
+    isOwnerActive: async () => true,
     isOboConfigTrusted: async () => true,
     pauseSchedule: async () => {
       row.enabled = false;
