@@ -5,6 +5,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import type { IMessage } from '..';
 import { tenantStorage, runAsSystem } from '~/config/tenantContext';
 import { createMessageMethods } from './message';
+import type { MessageMethods } from './message';
 import { createModels } from '../models';
 import logger from '~/config/winston';
 
@@ -1170,5 +1171,84 @@ describe('Message Operations', () => {
       expect(doc?.text).toBe('Updated');
       expect(doc?.tenantId).toBeUndefined();
     });
+  });
+});
+
+describe('Native OpenAI container continuation claims', () => {
+  const signature = 'a'.repeat(64);
+  let messageId: string;
+  let conversationId: string;
+  const claim = (overrides: Partial<Parameters<MessageMethods['claimOpenAIContainer']>[0]> = {}) =>
+    createMessageMethods(mongoose).claimOpenAIContainer({
+      userId: 'container-owner',
+      messageId,
+      conversationId,
+      signature,
+      ...overrides,
+    });
+
+  beforeEach(async () => {
+    messageId = uuidv4();
+    conversationId = uuidv4();
+    await Message.create({
+      messageId,
+      conversationId,
+      user: 'container-owner',
+      isCreatedByUser: false,
+      metadata: {
+        openAIContainer: { id: 'cntr_test', updatedAt: 1000, signature },
+        usage: { input: 10 },
+      },
+    });
+  });
+
+  it('allows exactly one competing continuation, without changing usage or timestamps', async () => {
+    const before = await Message.findOne({ messageId }).lean();
+    const results = await Promise.all(Array.from({ length: 12 }, () => claim()));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const after = await Message.findOne({ messageId }).lean();
+    expect(after?.metadata?.usage).toEqual(before?.metadata?.usage);
+    expect(after?.metadata?.openAIContainer).toEqual(before?.metadata?.openAIContainer);
+    expect(after?.metadata?.openAIContainerClaimed).toBe(true);
+    expect(after?.updatedAt).toEqual(before?.updatedAt);
+  });
+
+  it('rejects other users, conversations, messages and stale signatures', async () => {
+    for (const override of [
+      { userId: 'other-user' },
+      { conversationId: uuidv4() },
+      { messageId: uuidv4() },
+      { signature: 'b'.repeat(64) },
+    ])
+      expect(await claim(override)).toBe(false);
+    expect(await claim()).toBe(true);
+  });
+
+  it('respects tenant isolation and ignores user messages', async () => {
+    await Message.deleteOne({ messageId });
+    await tenantStorage.run({ tenantId: 'container-tenant' }, async () => {
+      await Message.create({
+        messageId,
+        conversationId,
+        user: 'container-owner',
+        isCreatedByUser: false,
+        metadata: { openAIContainer: { signature } },
+      });
+    });
+    await tenantStorage.run({ tenantId: 'another-tenant' }, async () => {
+      expect(await claim()).toBe(false);
+    });
+    await tenantStorage.run({ tenantId: 'container-tenant' }, async () => {
+      expect(await claim()).toBe(true);
+    });
+    messageId = uuidv4();
+    await Message.create({
+      messageId,
+      conversationId,
+      user: 'container-owner',
+      isCreatedByUser: true,
+      metadata: { openAIContainer: { signature } },
+    });
+    expect(await claim()).toBe(false);
   });
 });

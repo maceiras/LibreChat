@@ -28,6 +28,12 @@ export interface MessageTextStats {
 }
 
 export interface MessageMethods {
+  claimOpenAIContainer(params: {
+    userId: string;
+    conversationId: string;
+    messageId: string;
+    signature: string;
+  }): Promise<boolean>;
   saveMessage(
     ctx: { userId: string; isTemporary?: boolean; interfaceConfig?: AppConfig['interfaceConfig'] },
     params: Partial<IMessage> & { newMessageId?: string },
@@ -83,6 +89,28 @@ export interface MessageMethods {
 }
 
 export function createMessageMethods(mongoose: typeof import('mongoose')): MessageMethods {
+  async function claimOpenAIContainer({
+    userId,
+    conversationId,
+    messageId,
+    signature,
+  }: Parameters<MessageMethods['claimOpenAIContainer']>[0]): Promise<boolean> {
+    const Message = mongoose.models.Message as Model<IMessage>;
+    const result = await Message.updateOne(
+      {
+        user: userId,
+        conversationId,
+        messageId,
+        isCreatedByUser: false,
+        'metadata.openAIContainer.signature': signature,
+        'metadata.openAIContainerClaimed': { $exists: false },
+      },
+      { $set: { 'metadata.openAIContainerClaimed': true } },
+      { timestamps: false },
+    );
+    return result.modifiedCount === 1;
+  }
+
   /**
    * Saves a message in the database.
    */
@@ -540,6 +568,7 @@ export function createMessageMethods(mongoose: typeof import('mongoose')): Messa
   }
 
   return {
+    claimOpenAIContainer,
     saveMessage,
     bulkSaveMessages,
     recordMessage,

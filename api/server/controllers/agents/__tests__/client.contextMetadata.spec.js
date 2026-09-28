@@ -34,9 +34,10 @@ const primaryFor = (runId, output_tokens) => ({
   runId,
 });
 
-function buildMeta({ snap, latestUsageIndex, usageEvents, responseProgress }) {
+function buildMeta({ snap, latestUsageIndex, usageEvents, responseProgress, openAIContainer }) {
   const self = {
     options: { responseProgress },
+    openAIContainer,
     collectedThoughtSignatures: null,
     usageEmitSink: usageEvents,
     contextUsageSink: snap
@@ -47,6 +48,15 @@ function buildMeta({ snap, latestUsageIndex, usageEvents, responseProgress }) {
 }
 
 describe('AgentClient.buildResponseMetadata — snapshot persistence + summary marker', () => {
+  it('persists the native container session alongside usage and progress', () => {
+    const session = { id: 'cntr_test', updatedAt: 1000, signature: 'signed-session' };
+    const metadata = buildMeta({
+      usageEvents: [primary],
+      openAIContainer: { snapshot: () => session },
+    });
+    expect(metadata.openAIContainer).toEqual(session);
+    expect(metadata.usage).toBeDefined();
+  });
   it('persists the progress tracker snapshot with the response', () => {
     const progress = {
       messageId: 'response-1',

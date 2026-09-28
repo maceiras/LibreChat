@@ -4,6 +4,7 @@ const { getBufferString, HumanMessage } = require('@librechat/agents/langchain/m
 const {
   createRun,
   withResponseProgress,
+  prepareOpenAIContainer,
   isEnabled,
   checkAccess,
   buildToolSet,
@@ -56,6 +57,7 @@ const {
 } = require('@librechat/api');
 const {
   Callback,
+  GraphEvents,
   Providers,
   TitleMethod,
   formatMessage,
@@ -101,6 +103,9 @@ class AgentClient extends BaseClient {
 
     /** @type {AgentRun} */
     this.run;
+
+    /** @type {import('@librechat/api').ReusableOpenAIContainer | undefined} */
+    this.openAIContainer;
 
     /** Resolves with the agent run once `chatCompletion` initializes it (or
      *  `null` if initialization fails), letting immediate-mode title generation
@@ -915,6 +920,7 @@ class AgentClient extends BaseClient {
    *   thoughtSignatures?: Record<string, string>,
    *   contextUsage?: import('librechat-data-provider').TContextUsageEvent,
    *   responseProgress?: import('librechat-data-provider').ResponseProgress,
+   *   openAIContainer?: import('@librechat/api').OpenAIContainerSession,
    *   usage?: import('librechat-data-provider').TResponseUsage,
    * } | undefined}
    */
@@ -923,9 +929,12 @@ class AgentClient extends BaseClient {
      *   thoughtSignatures?: Record<string, string>,
      *   contextUsage?: import('librechat-data-provider').TContextUsageEvent,
      *   responseProgress?: import('librechat-data-provider').ResponseProgress,
+     *   openAIContainer?: import('@librechat/api').OpenAIContainerSession,
      *   usage?: import('librechat-data-provider').TResponseUsage,
      * }} */
     const metadata = {};
+    const openAIContainer = this.openAIContainer?.snapshot();
+    if (openAIContainer) metadata.openAIContainer = openAIContainer;
     const responseProgress = this.options?.responseProgress?.snapshot();
     if (responseProgress) metadata.responseProgress = responseProgress;
     const signatures = this.collectedThoughtSignatures;
@@ -1184,6 +1193,18 @@ class AgentClient extends BaseClient {
       const toolSet = buildToolSet(this.options.agent);
       const tokenCounter = createTokenCounter(this.getEncoding());
 
+      this.openAIContainer = await prepareOpenAIContainer(this.options.agent, {
+        userId: this.options.req.user.id,
+        tenantId: this.options.req.user.tenantId,
+        conversationId: this.conversationId,
+        messageId: this.responseMessageId,
+        history: this.currentMessages ?? [],
+        parentMessageId: this.parentMessageId,
+        user: createSafeUser(this.options.req.user),
+        claim: db.claimOpenAIContainer,
+        signal: abortController.signal,
+      });
+
       /** Pre-resolve invoked skill bodies + re-prime files before formatting messages */
       const skillPrimeResult = this.options.primeInvokedSkills
         ? await this.options.primeInvokedSkills(payload)
@@ -1328,15 +1349,16 @@ class AgentClient extends BaseClient {
        * @param {BaseMessage[]} messages
        */
       const runAgents = async (messages) => {
+        const primaryAgent = this.openAIContainer.agent;
         const agents = [
           this.options.responseProgress
             ? withResponseProgress(
-                this.options.agent,
+                primaryAgent,
                 this.options.responseProgress,
                 this.responseMessageId,
                 abortController.signal,
               )
-            : this.options.agent,
+            : primaryAgent,
         ];
         // Include additional agents when:
         // - agentConfigs has agents (from addedConvo parallel execution or agent handoffs)
@@ -1398,7 +1420,12 @@ class AgentClient extends BaseClient {
           calibrationRatio,
           runId: this.responseMessageId,
           signal: abortController.signal,
-          customHandlers: this.options.eventHandlers,
+          customHandlers: {
+            ...this.options.eventHandlers,
+            [GraphEvents.CHAT_MODEL_END]: this.openAIContainer.wrapHandler(
+              this.options.eventHandlers[GraphEvents.CHAT_MODEL_END],
+            ),
+          },
           requestBody: config.configurable.requestBody,
           user: createSafeUser(this.options.req?.user),
           tenantId: this.options.req?.user?.tenantId,

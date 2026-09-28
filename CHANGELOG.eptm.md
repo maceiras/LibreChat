@@ -40,6 +40,28 @@ between conversation turns by this integration.
 
 - **Documentation**: add this changelog and guidelines for keeping it up to date.
 
+## 2026-09-28 — Reusable OpenAI Python containers
+
+- Reuse the primary agent's native Responses Code Interpreter container across
+  conversation turns, including reloads. Persist its reference even when Python
+  returns no file, and validate the remote container before continuing.
+- Start a fresh workspace after 20 minutes of locally observed inactivity or when
+  OpenAI reports an expired or missing container. Tell the model to reconstruct
+  needed state from available inputs; do not promise recovery of Python variables
+  or unsaved intermediate files. Other provider failures remain visible.
+- Bind session references to the owner, tenant, conversation, agent and provider
+  configuration with a keyed signature. Atomically claim each saved continuation
+  so concurrent replies and older branches cannot share a mutable workspace.
+- Preserve configured transports, gateway headers, native web search, progress
+  and output attachments. Explicitly configured containers and secondary agents
+  retain their existing behavior. Existing messages without session metadata start
+  with a new container after the backend is rebuilt and restarted.
+- Validation: 139 targeted tests passed, including real SDK serialization and
+  MongoDB concurrency/tenant isolation. API/data-schemas TypeScript, changed-file
+  ESLint and both package builds passed. Three live OpenAI calls verified Python
+  state across persisted messages and a fresh container after simulated expiry.
+  The running local backend was not redeployed.
+
 ## 2026-09-28 — Native Responses progress
 
 - Hide the redundant waiting dot when the same message displays the Responses
