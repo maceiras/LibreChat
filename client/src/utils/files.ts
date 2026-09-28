@@ -227,6 +227,7 @@ export const validateFiles = ({
   endpointFileConfig,
   toolResource,
   fileConfig,
+  getToolResource,
 }: {
   fileList: File[];
   files: Map<string, ExtendedFile>;
@@ -234,6 +235,7 @@ export const validateFiles = ({
   endpointFileConfig: EndpointFileConfig;
   toolResource?: string;
   fileConfig: FileConfig | null;
+  getToolResource?: (file: File) => string | undefined | null;
 }) => {
   const { fileLimit, fileSizeLimit, totalSizeLimit, supportedMimeTypes, disabled } =
     endpointFileConfig;
@@ -272,12 +274,18 @@ export const validateFiles = ({
       fileList[i] = newFile;
     }
 
+    const fileToolResource = getToolResource ? getToolResource(originalFile) : toolResource;
+    if (fileToolResource === null) {
+      setError(`Unsupported file type: ${originalFile.type}`);
+      return false;
+    }
     let mimeTypesToCheck = supportedMimeTypes;
-    if (toolResource === EToolResources.context) {
+    if (fileToolResource === EToolResources.context) {
+      const textConfig = fileConfig ?? defaultFileConfig;
       mimeTypesToCheck = [
-        ...(fileConfig?.text?.supportedMimeTypes || []),
-        ...(fileConfig?.ocr?.supportedMimeTypes || []),
-        ...(fileConfig?.stt?.supportedMimeTypes || []),
+        ...(textConfig.text?.supportedMimeTypes || []),
+        ...(textConfig.ocr?.supportedMimeTypes || []),
+        ...(textConfig.stt?.supportedMimeTypes || []),
       ];
     }
 
