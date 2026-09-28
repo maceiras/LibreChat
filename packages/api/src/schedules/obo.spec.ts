@@ -513,6 +513,21 @@ describe('separately authorized scheduled OBO grants', () => {
     }
   }, 30_000);
 
+  it('does not enroll a ClickHouse Cloud direct-OAuth MCP server as an OBO grant', async () => {
+    const { service, setServer, requestGrant, tokenStore } = harness();
+    setServer({
+      type: 'streamable-http',
+      url: 'https://mcp.clickhouse.cloud/mcp',
+      source: 'yaml',
+      requiresOAuth: true,
+    });
+    await expect(
+      service.enroll(user.id, context.scheduleId, 'Files', 'assertion'),
+    ).rejects.toMatchObject({ reason: 'missing_upstream_provider' });
+    expect(requestGrant).not.toHaveBeenCalled();
+    expect(tokenStore.getAll()).toEqual([]);
+  });
+
   it('rejects an OBO server that did not issue an offline refresh token', async () => {
     const { service, requestGrant, tokenStore } = harness();
     requestGrant.mockResolvedValueOnce({ access_token: 'first', expires_in: 3600 });
