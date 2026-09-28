@@ -281,6 +281,26 @@ describe('separately authorized scheduled OBO grants', () => {
     expect(tokenStore.getAll()).toEqual([]);
   });
 
+  it('coalesces simultaneous expired-grant reads instead of replaying a rotating refresh token', async () => {
+    const { service, row, tokenStore, requestGrant } = harness();
+    await service.enroll(user.id, row.id, 'Files', 'assertion');
+    row.enabled = true;
+    const old = tokenStore.getAll().find((record) => record.type === 'mcp_oauth')!;
+    await tokenStore.updateToken(
+      { userId: user.id, type: 'mcp_oauth', identifier: old.identifier },
+      { expiresAt: new Date(Date.now() - 12 * 60 * 60_000) },
+    );
+    const [first, second] = await Promise.all([
+      service.resolve(user, { context, target }),
+      service.resolve(user, { context, target }),
+    ]);
+    await expect(Promise.all([first!(), second!()])).resolves.toEqual([
+      expect.objectContaining({ access_token: 'fresh-after-12h' }),
+      expect.objectContaining({ access_token: 'fresh-after-12h' }),
+    ]);
+    expect(requestGrant.mock.calls.filter(([, type]) => type === 'refresh_token')).toHaveLength(1);
+  });
+
   it('retains a non-rotating provider refresh token after a subsequent access renewal', async () => {
     const { service, row, tokenStore, requestGrant } = harness();
     await service.enroll(user.id, row.id, 'Files', 'assertion');

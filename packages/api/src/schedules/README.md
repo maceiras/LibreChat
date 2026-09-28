@@ -75,7 +75,11 @@ or invalid grant never falls back to the browser session. Existing schedules
 and non-OBO servers keep their previous behavior. A provider that does not
 support the separate offline grant continues to report missing unattended
 authorization. Tests simulate a later access-token expiry; verification against
-an actual provider with recurring runs remains outstanding.
+an actual provider with recurring runs remains outstanding. Enable the allowlist
+only after every replica has upgraded: an older worker cannot read these grants
+and may otherwise disable a newly enrolled schedule. Closing a browser or
+signing out does not automatically revoke this separately authorized grant;
+use **Revoke offline access** or delete the schedule to withdraw it.
 
 ## Host token-provider context
 
