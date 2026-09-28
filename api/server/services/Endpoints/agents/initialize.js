@@ -45,6 +45,8 @@ const AgentClient = require('~/server/controllers/agents/client');
 const { processAddedConvo } = require('./addedConvo');
 const { logViolation } = require('~/cache');
 const db = require('~/models');
+const { getStrategyFunctions } = require('~/server/services/Files/strategies');
+const { getRetentionExpiry } = require('~/server/services/Files/retention');
 
 /**
  * Creates a tool loader function for the agent.
@@ -263,6 +265,8 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
 
   const eventHandlers = getDefaultHandlers({
     res,
+    artifactPromises,
+    openAIFileOptions: { req, getStrategyFunctions, getRetentionExpiry, createFile: db.createFile },
     toolExecuteOptions,
     summarizationOptions,
     aggregateContent,

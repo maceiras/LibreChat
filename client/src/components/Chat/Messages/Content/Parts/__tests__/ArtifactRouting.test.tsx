@@ -1,9 +1,11 @@
 import React from 'react';
 import { RecoilRoot, useRecoilValue } from 'recoil';
+import { FileContext } from 'librechat-data-provider';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import type { TAttachment } from 'librechat-data-provider';
 import type { MutableSnapshot } from 'recoil';
 import Attachment, { AttachmentGroup } from '../Attachment';
+import ContainerFiles from '../../ContainerFiles';
 import store from '~/store';
 
 jest.mock('~/hooks', () => ({
@@ -872,5 +874,41 @@ describe('AttachmentGroup routing', () => {
     fireEvent.click(toggle);
     expect(screen.getByText('data.json')).toBeInTheDocument();
     expect(container.querySelector('pre')?.textContent).toBe('{"a":1}');
+  });
+});
+
+describe('OpenAI container attachments', () => {
+  it('shows hosted output downloads without a LibreChat tool call, including after reload', () => {
+    const attachments = [
+      baseAttachment({
+        file_id: 'hosted-output',
+        filename: 'report.zip',
+        context: FileContext.code_interpreter,
+      }),
+    ];
+    const view = renderWith(<ContainerFiles attachments={attachments} />);
+    expect(screen.getByText('report.zip')).toBeInTheDocument();
+    view.unmount();
+    renderWith(<ContainerFiles attachments={JSON.parse(JSON.stringify(attachments))} />, {
+      streaming: false,
+    });
+    expect(screen.getByText('report.zip')).toBeInTheDocument();
+  });
+
+  it('leaves ordinary and tool-bound attachments to their existing renderers', () => {
+    renderWith(
+      <ContainerFiles
+        attachments={[
+          baseAttachment({ filename: 'ordinary.zip' }),
+          baseAttachment({
+            filename: 'tool.zip',
+            context: FileContext.code_interpreter,
+            toolCallId: 'tool',
+          }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText('ordinary.zip')).not.toBeInTheDocument();
+    expect(screen.queryByText('tool.zip')).not.toBeInTheDocument();
   });
 });

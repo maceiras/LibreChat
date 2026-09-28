@@ -7,6 +7,8 @@ jest.mock('nanoid', () => ({
 
 jest.mock('@librechat/api', () => ({
   sendEvent: jest.fn(),
+  createOpenAIFileHandler: jest.requireActual('@librechat/api').createOpenAIFileHandler,
+  GenerationJobManager: { emitChunk: jest.fn() },
   HOST_FILE_AUTHORING_ARTIFACT_KEY: '__librechat_file_authoring',
   isCodeSessionToolName: jest.fn((name) =>
     ['execute_code', 'bash_tool', 'read_file'].includes(name),
@@ -682,4 +684,91 @@ describe('isStreamWritable', () => {
   it('returns true on the happy path: headers sent, not ended, no streamId', () => {
     expect(isStreamWritable({ headersSent: true, writableEnded: false }, null)).toBe(true);
   });
+});
+
+describe('OpenAI Responses output attachments', () => {
+  it.each([null, 'resumable-job'])(
+    'persists and emits downloaded outputs (streamId=%s)',
+    async (streamId) => {
+      const { StandardGraph, GraphEvents, Providers } = require('@librechat/agents');
+      const { AIMessageChunk } = require('@librechat/agents/langchain/messages');
+      const { getDefaultHandlers } = require('../callbacks');
+      const { GenerationJobManager } = require('@librechat/api');
+      const fetch = jest.fn(async () => new Response('a,b\n1,2\n'));
+      const req = { user: { id: '507f1f77bcf86cd799439011' }, config: { fileStrategy: 'local' } };
+      const res = { headersSent: true, writableEnded: false, write: jest.fn() };
+      const artifactPromises = [];
+      const createFile = jest.fn(async (file) => file);
+      const handlers = getDefaultHandlers({
+        res,
+        streamId,
+        artifactPromises,
+        collectedUsage: [],
+        aggregateContent: jest.fn(),
+        openAIFileOptions: {
+          req,
+          createFile,
+          getStrategyFunctions: () => ({ saveBuffer: async () => '/uploads/owned/report.csv' }),
+          getRetentionExpiry: async () => ({}),
+        },
+      });
+      const graph = new StandardGraph({
+        agents: [
+          {
+            agentId: 'native',
+            provider: Providers.OPENAI,
+            clientOptions: { useResponsesApi: true, apiKey: 'test-key', configuration: { fetch } },
+          },
+        ],
+      });
+      const output = new AIMessageChunk({
+        content: [
+          {
+            type: 'text',
+            text: 'Report created.',
+            annotations: [
+              {
+                type: 'citation',
+                source: 'container_file_citation',
+                title: 'report.csv',
+                file_id: 'cfile_test',
+                container_id: 'cntr_test',
+              },
+            ],
+          },
+        ],
+      });
+      await handlers[GraphEvents.CHAT_MODEL_END].handle(
+        GraphEvents.CHAT_MODEL_END,
+        { output },
+        {
+          run_id: 'reply',
+          thread_id: 'conversation',
+          langgraph_node: 'agent=native',
+        },
+        graph,
+      );
+      const [file] = await Promise.all(artifactPromises);
+      expect(file).toMatchObject({
+        filename: 'report.csv',
+        messageId: 'reply',
+        conversationId: 'conversation',
+        context: 'code_interpreter',
+      });
+      expect(createFile).toHaveBeenCalledWith(
+        expect.objectContaining({ file_id: file.file_id }),
+        true,
+      );
+      if (streamId) {
+        expect(GenerationJobManager.emitChunk).toHaveBeenCalledWith(streamId, {
+          event: 'attachment',
+          data: file,
+        });
+      } else {
+        expect(res.write).toHaveBeenCalledWith(
+          `event: attachment\ndata: ${JSON.stringify(file)}\n\n`,
+        );
+      }
+    },
+  );
 });

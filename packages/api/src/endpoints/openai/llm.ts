@@ -453,6 +453,7 @@ export function getOpenAILLMConfig({
     reasoning_summary,
     verbosity,
     web_search,
+    code_execution,
     promptCache,
     promptCacheTtl,
     frequency_penalty,
@@ -490,12 +491,19 @@ export function getOpenAILLMConfig({
   }
 
   let enableWebSearch = web_search;
+  let enableCodeExecution = code_execution;
   let enablePromptCache = promptCache;
   let promptCacheTtlValue = promptCacheTtl;
 
   /** Apply defaultParams first - only if fields are undefined */
   if (defaultParams && typeof defaultParams === 'object') {
     for (const [key, value] of Object.entries(defaultParams)) {
+      if (key === 'code_execution') {
+        if (enableCodeExecution === undefined && typeof value === 'boolean') {
+          enableCodeExecution = value;
+        }
+        continue;
+      }
       if (key === 'web_search') {
         if (enableWebSearch === undefined && typeof value === 'boolean') {
           enableWebSearch = value;
@@ -553,6 +561,12 @@ export function getOpenAILLMConfig({
   /** Apply addParams - can override defaultParams */
   if (addParams && typeof addParams === 'object') {
     for (const [key, value] of Object.entries(addParams)) {
+      if (key === 'code_execution') {
+        if (typeof value === 'boolean') {
+          enableCodeExecution = value;
+        }
+        continue;
+      }
       if (key === 'web_search') {
         if (typeof value === 'boolean') {
           enableWebSearch = value;
@@ -635,6 +649,11 @@ export function getOpenAILLMConfig({
   }
   if (dropParams && dropParams.includes('promptCacheTtl')) {
     promptCacheTtlValue = undefined;
+  }
+
+  if (enableCodeExecution === true && !useOpenRouter && !dropParams?.includes('code_execution')) {
+    llmConfig.useResponsesApi = true;
+    tools.push({ type: 'code_interpreter', container: { type: 'auto' } });
   }
 
   if (useOpenRouter && enableWebSearch) {
