@@ -1,12 +1,18 @@
 import { Keyv } from 'keyv';
+import jwt from 'jsonwebtoken';
 import { Permissions, PermissionTypes } from 'librechat-data-provider';
 import type { AppConfig, IUser } from '@librechat/data-schemas';
 import type { Response } from 'express';
 import type { ParsedServerConfig } from '../mcp/types';
 import type { ServerRequest } from '../types/http';
+import {
+  InMemoryTokenStore,
+  MockKeyv,
+  createOAuthMCPServer,
+} from '../mcp/__tests__/helpers/oauthTestServer';
 import { createScheduledOboGrantService, createLazyScheduledOboGrantService } from './obo';
-import { InMemoryTokenStore, MockKeyv } from '../mcp/__tests__/helpers/oauthTestServer';
 import { OboTokenResolutionError, resolveOboToken } from '../mcp/oauth/obo';
+import { MCPConnectionFactory } from '../mcp/MCPConnectionFactory';
 import { FlowStateManager } from '../flow/manager';
 
 jest.mock('@librechat/data-schemas', () => ({
@@ -70,6 +76,10 @@ function harness() {
   let baseAvailable = true;
   let server = config;
   const inspect = jest.fn(async (_agent, _user, _id, _server, onSelected) => onSelected(server));
+  const pauseSchedule = jest.fn(async () => {
+    row.enabled = false;
+    return row;
+  });
   const service = createScheduledOboGrantService({
     tokens: tokenStore,
     flowManager: flow,
@@ -105,15 +115,22 @@ function harness() {
     inspect,
     isOwnerActive: async () => true,
     isOboConfigTrusted: async () => true,
-    pauseSchedule: async () => {
-      row.enabled = false;
-      return row;
+    isLiveAccessTokenValid: (session) => {
+      const decoded = session.accessToken ? jwt.decode(session.accessToken) : null;
+      const expiry =
+        decoded && typeof decoded === 'object' && typeof decoded.exp === 'number'
+          ? decoded.exp
+          : session.accessTokenExpiresAt;
+      return typeof expiry === 'number' && expiry > Math.floor(Date.now() / 1000) + 30;
     },
+    pauseSchedule,
   });
   return {
     service,
     tokenStore,
+    flow,
     row,
+    pauseSchedule,
     requestGrant,
     inspect,
     setAllowed: (names: string[]) => {
@@ -258,6 +275,36 @@ describe('separately authorized scheduled OBO grants', () => {
     expect(requestGrant).not.toHaveBeenCalled();
   });
 
+  it('never pauses an enabled schedule when the requested server has no grant', async () => {
+    const { service, row, pauseSchedule } = harness();
+    row.enabled = true;
+    await expect(service.revoke(user.id, row.id, 'unselected')).rejects.toMatchObject({
+      reason: 'missing_upstream_provider',
+    });
+    expect(row.enabled).toBe(true);
+    expect(pauseSchedule).not.toHaveBeenCalled();
+  });
+
+  it('keeps a schedule visible for retry when grant cleanup fails before deletion', async () => {
+    const { service, row, tokenStore } = harness();
+    await service.enroll(user.id, row.id, 'Files', 'assertion');
+    row.enabled = true;
+    const deleteSchedule = jest.fn(async () => {
+      row.enabled = false;
+      return 'deleted';
+    });
+    const cleanup = jest
+      .spyOn(tokenStore, 'deleteTokens')
+      .mockRejectedValueOnce(new Error('store offline'));
+    await expect(service.purge(user.id, row.id, deleteSchedule)).rejects.toThrow('store offline');
+    expect(deleteSchedule).not.toHaveBeenCalled();
+    expect(row.enabled).toBe(true);
+    cleanup.mockRestore();
+    await expect(service.purge(user.id, row.id, deleteSchedule)).resolves.toBe('deleted');
+    expect(tokenStore.getAll()).toEqual([]);
+    expect(deleteSchedule).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects an enrollment finishing after the owner deletes the schedule', async () => {
     const { service, tokenStore, requestGrant } = harness();
     let unblock!: () => void;
@@ -359,6 +406,112 @@ describe('separately authorized scheduled OBO grants', () => {
     expect(response.status).toHaveBeenLastCalledWith(400);
     expect(requestGrant).toHaveBeenCalledTimes(1);
   });
+
+  it('accepts a valid live JWT access token without a redundant persisted expiry', async () => {
+    const { service, requestGrant } = harness();
+    const response = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+      end: jest.fn(),
+    } as unknown as Response;
+    const token = jwt.sign(
+      { sub: user.openidId, exp: Math.floor(Date.now() / 1000) + 3600 },
+      'test-only-signature',
+    );
+    const request = {
+      user,
+      params: { id: context.scheduleId, server: target.mcpServer },
+      body: { expectedScopes: target.scopes },
+      session: {
+        openidTokens: {
+          appUserId: user.id,
+          openidSubject: user.openidId,
+          openidIssuer: user.openidIssuer,
+          tenantId: user.tenantId,
+          accessToken: token,
+        },
+      },
+    } as unknown as ServerRequest;
+    await service.enrollFromRequest(request, response);
+    expect(response.status).toHaveBeenCalledWith(204);
+    expect(requestGrant).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ assertion: token }),
+    );
+  });
+
+  it('calls a real MCP SDK server before and after offline OBO access-token renewal', async () => {
+    const sentBearers: string[] = [];
+    const mcp = await createOAuthMCPServer({
+      onResourceRequest: (request) => {
+        if (request.method === 'POST' && request.headers.authorization) {
+          sentBearers.push(request.headers.authorization);
+        }
+      },
+    });
+    const { service, row, setServer, requestGrant, tokenStore, flow } = harness();
+    const liveServer = { ...config, url: mcp.url };
+    setServer(liveServer);
+    requestGrant.mockImplementation(async (_provider, grantType, params) => {
+      const fresh = grantType === 'refresh_token';
+      if (fresh && params.refresh_token !== 'offline-mcp-refresh') {
+        throw new Error('Wrong refresh grant');
+      }
+      const token = fresh ? 'mcp-renewed' : 'mcp-first';
+      mcp.issuedTokens.add(token);
+      mcp.tokenIssueTimes.set(token, Date.now());
+      return {
+        access_token: token,
+        refresh_token: 'offline-mcp-refresh',
+        expires_in: 3600,
+      };
+    });
+    try {
+      await service.enroll(user.id, row.id, 'Files', 'one-time-user-assertion');
+      row.enabled = true;
+      const options = {
+        user,
+        useOAuth: true as const,
+        flowManager: flow,
+        tokenMethods: tokenStore,
+        oboTokenResolver: jest.fn(async () => {
+          throw new Error('A downstream token must not be exchanged as an upstream assertion');
+        }),
+        oboTrustChecker: jest.fn(async () => true),
+        upstreamTokenProviderResolver: (input?: { target?: typeof target }) =>
+          service.resolve(user, { context, target: input?.target }),
+      };
+      const call = async (message: string) => {
+        const connection = await MCPConnectionFactory.create(
+          { serverName: 'Files', serverConfig: liveServer },
+          options,
+        );
+        try {
+          expect((await connection.fetchTools()).map((tool) => tool.name)).toContain('echo');
+          const reply = await connection.client.callTool({ name: 'echo', arguments: { message } });
+          expect(reply.content).toEqual([{ type: 'text', text: `echo: ${message}` }]);
+        } finally {
+          await connection.dispose();
+        }
+      };
+      await call('first run');
+      const access = tokenStore.getAll().find((record) => record.type === 'mcp_oauth')!;
+      await tokenStore.updateToken(
+        { userId: user.id, type: 'mcp_oauth', identifier: access.identifier },
+        { expiresAt: new Date(Date.now() - 12 * 60 * 60_000) },
+      );
+      await call('later run');
+      expect(sentBearers).toContain('Bearer mcp-first');
+      expect(sentBearers).toContain('Bearer mcp-renewed');
+      expect(options.oboTokenResolver).not.toHaveBeenCalled();
+      expect(requestGrant.mock.calls.filter(([, kind]) => kind === 'refresh_token')).toHaveLength(
+        1,
+      );
+    } finally {
+      await mcp.close();
+    }
+  }, 30_000);
 
   it('rejects an OBO server that did not issue an offline refresh token', async () => {
     const { service, requestGrant, tokenStore } = harness();

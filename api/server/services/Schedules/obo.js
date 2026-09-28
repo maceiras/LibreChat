@@ -30,6 +30,8 @@ module.exports = createLazyScheduledOboGrantService(() =>
     getRoleByName: methods.getRoleByName,
     agentAccess: resolveAgentFireAccess,
     getOpenIdConfig,
+    isLiveAccessTokenValid: require('~/server/services/OpenIDSessionRefresh')
+      .isLiveAccessTokenValid,
     requestGrant: (config, type, parameters) =>
       client.genericGrantRequest(config, type, parameters),
     isOwnerActive: methods.isAgentTriggerPrincipalActive,

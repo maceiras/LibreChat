@@ -2748,6 +2748,19 @@ describe('OpenIDSessionRefresh', () => {
       expect(result).toBe(jwtExp);
     });
 
+    it('reuses the same access-token validity policy for scheduled OBO enrollment', () => {
+      const now = Math.floor(Date.now() / 1000);
+      const { isLiveAccessTokenValid } = require('./OpenIDSessionRefresh');
+      expect(isLiveAccessTokenValid({ accessToken: makeJwt(now + 600) })).toBe(true);
+      expect(
+        isLiveAccessTokenValid({ accessToken: makeJwt(now - 60), accessTokenExpiresAt: now + 600 }),
+      ).toBe(false);
+      expect(
+        isLiveAccessTokenValid({ accessToken: 'opaque', accessTokenExpiresAt: now + 600 }),
+      ).toBe(true);
+      expect(isLiveAccessTokenValid({ accessToken: 'opaque' })).toBe(false);
+    });
+
     it('getAccessTokenExp returns null when neither a decodable JWT nor a persisted expiry is present', () => {
       const result = __internals.getAccessTokenExp({
         accessToken: 'opaque',

@@ -870,6 +870,40 @@ describe('deleteSchedule result mapping', () => {
     expect(captured.status).toBe(404);
   });
 
+  it('does not delete or hide a schedule when OBO grant cleanup fails', async () => {
+    const deleteSchedule = jest.fn(async () => 'deleted' as const);
+    const purgeOboGrants = jest.fn(async () => {
+      throw new Error('credential store offline');
+    });
+    const deps = makeCreateDeps({ deleteSchedule, purgeOboGrants });
+    const { res, captured } = makeRes();
+    await createSchedulesHandlers(deps).deleteSchedule(makeDeleteReq(), res);
+    expect(captured.status).toBe(503);
+    expect(deleteSchedule).not.toHaveBeenCalled();
+    expect(purgeOboGrants).toHaveBeenCalledWith('user-1', 'sched-1', expect.any(Function));
+  });
+
+  it('purges OBO grants before deleting the schedule within the cleanup callback', async () => {
+    const order: string[] = [];
+    const deleteSchedule = jest.fn(async () => {
+      order.push('delete');
+      return 'deleted' as const;
+    });
+    const purgeOboGrants: NonNullable<SchedulesHandlersDeps['purgeOboGrants']> = async (
+      _userId,
+      _id,
+      afterPurge,
+    ) => {
+      order.push('purge');
+      return afterPurge();
+    };
+    const deps = makeCreateDeps({ deleteSchedule, purgeOboGrants });
+    const { res, captured } = makeRes();
+    await createSchedulesHandlers(deps).deleteSchedule(makeDeleteReq(), res);
+    expect(captured.status ?? 200).toBe(200);
+    expect(order).toEqual(['purge', 'delete']);
+  });
+
   it('answers 200 when drained and erased', async () => {
     const { res, captured } = makeRes();
     await createSchedulesHandlers(withResult('deleted')).deleteSchedule(makeDeleteReq(), res);

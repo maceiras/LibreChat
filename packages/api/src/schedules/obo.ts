@@ -2,6 +2,7 @@ import { Permissions, PermissionTypes } from 'librechat-data-provider';
 import { logger, getTenantId, isRuntimeDisabled } from '@librechat/data-schemas';
 import type { IUser, TokenMethods, AppConfig } from '@librechat/data-schemas';
 import type { Response } from 'express';
+import type { SessionOpenIDTokens } from '../auth/openid/types';
 import type { HostUpstreamTokenProviderResolver } from './mcp';
 import type { UpstreamTokenTarget } from '../mcp/oauth/obo';
 import type { GetAppConfigOptions } from '../app/service';
@@ -89,6 +90,7 @@ interface GrantDeps {
     revision?: number,
   ) => Promise<ScheduleGrantRow | null>;
   isOboConfigTrusted: (config: ParsedServerConfig) => Promise<boolean>;
+  isLiveAccessTokenValid: (tokens: SessionOpenIDTokens) => boolean;
 }
 
 /** Distinct namespace from direct MCP OAuth. Neither a login refresh token nor
@@ -132,7 +134,11 @@ export interface ScheduledOboGrantService {
   enrollFromRequest: (req: ServerRequest, res: Response) => Promise<void>;
   describeFromRequest: (req: ServerRequest, res: Response) => Promise<void>;
   revokeFromRequest: (req: ServerRequest, res: Response) => Promise<void>;
-  purge: (userId: string, scheduleId: string) => Promise<void>;
+  purge: <T>(
+    userId: string,
+    scheduleId: string,
+    afterPurge?: () => Promise<T>,
+  ) => Promise<T | undefined>;
   setInspector: (preflight: ScheduleMCPPreflight) => void;
 }
 
@@ -543,6 +549,13 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
   const revoke = async (userId: string, scheduleId: string, serverName: string) => {
     const schedule = await deps.getSchedule(scheduleId, userId);
     if (!schedule || String(schedule.user) !== userId) throw missingGrant();
+    const key = scheduledOboGrantKey(scheduleId, serverName);
+    const refresh = await tokens.findToken({
+      userId,
+      type: 'mcp_oauth_refresh',
+      identifier: `mcp:${key}:refresh`,
+    });
+    if (!refresh) throw missingGrant();
     if (
       schedule.enabled &&
       !(await deps.pauseSchedule(scheduleId, userId, schedule.configRevision))
@@ -552,7 +565,6 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
         new Error('Schedule changed during revocation'),
       );
     }
-    const key = scheduledOboGrantKey(scheduleId, serverName);
     const release = await MCPTokenStorage.beginRefreshTeardown(userId, key);
     const leaseId = getMCPOAuthLeaseId(userId, key);
     try {
@@ -585,18 +597,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
     const userId = req.user?.id;
     const { id: scheduleId, server: serverName } = req.params as { id: string; server: string };
     const session = (
-      req.session as
-        | (typeof req.session & {
-            openidTokens?: {
-              appUserId?: string;
-              openidSubject?: string;
-              openidIssuer?: string;
-              tenantId?: string;
-              accessToken?: string;
-              accessTokenExpiresAt?: number;
-            };
-          })
-        | undefined
+      req.session as (typeof req.session & { openidTokens?: SessionOpenIDTokens }) | undefined
     )?.openidTokens;
     let user: IUser | null = null;
     try {
@@ -615,8 +616,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
       session.openidIssuer !== user.openidIssuer ||
       session.tenantId !== user.tenantId ||
       !session.accessToken ||
-      !session.accessTokenExpiresAt ||
-      session.accessTokenExpiresAt <= Math.floor(Date.now() / 1000) + 30
+      !deps.isLiveAccessTokenValid(session)
     ) {
       res
         .status(401)
@@ -693,12 +693,18 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
     try {
       await revoke(userId, scheduleId, serverName);
       res.status(204).end();
-    } catch {
-      res.status(503).json({ error: 'Scheduled OBO grant could not be revoked. Try again.' });
+    } catch (error) {
+      res
+        .status(error instanceof OboTokenResolutionError && !error.retryable ? 400 : 503)
+        .json({ error: 'Scheduled OBO grant could not be revoked. Try again.' });
     }
   };
 
-  const purge = async (userId: string, scheduleId: string): Promise<void> => {
+  const purge = async <T>(
+    userId: string,
+    scheduleId: string,
+    afterPurge?: () => Promise<T>,
+  ): Promise<T | undefined> => {
     const leaseId = scheduleGrantLeaseId(userId, scheduleId);
     const generation = await deps.flowManager.getLeaseGeneration(leaseId);
     if (generation == null) throw new Error('Scheduled OBO grant cleanup is in progress');
@@ -713,6 +719,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
         userId,
         identifier: new RegExp(`^mcp:schedule-obo:${escaped}:`),
       });
+      return await afterPurge?.();
     } finally {
       await lease.release();
     }

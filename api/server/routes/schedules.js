@@ -82,7 +82,8 @@ const handlers = createSchedulesHandlers({
   // synchronously, aborts live ones, and reports honestly (see ScheduleDeleteResult);
   // a delivered abort erases on the generation's own outcome write, in any topology.
   deleteSchedule: deleteScheduleForOwner,
-  purgeOboGrants: (userId, scheduleId) => scheduledObo.purge(userId, scheduleId),
+  purgeOboGrants: (userId, scheduleId, afterPurge) =>
+    scheduledObo.purge(userId, scheduleId, afterPurge),
   // Durable account-deletion barrier. A one-shot disable scan cannot close the
   // create race, so every scheduling WRITE consults the user-level flag instead.
   isUserDeleting,

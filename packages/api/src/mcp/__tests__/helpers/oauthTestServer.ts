@@ -582,14 +582,18 @@ export class InMemoryTokenStore {
   findToken = (async (filter: {
     userId?: string;
     type?: string;
-    identifier?: string;
+    identifier?: string | RegExp;
     token?: string;
     metadataCredentialSetId?: string | null;
   }): Promise<InMemoryToken | null> => {
     for (const token of this.tokens.values()) {
       const matchUserId = !filter.userId || token.userId === filter.userId;
       const matchType = !filter.type || token.type === filter.type;
-      const matchIdentifier = !filter.identifier || token.identifier === filter.identifier;
+      const matchIdentifier =
+        !filter.identifier ||
+        (filter.identifier instanceof RegExp
+          ? filter.identifier.test(token.identifier)
+          : token.identifier === filter.identifier);
       const matchToken = !filter.token || token.token === filter.token;
       const matchCredentialSet =
         filter.metadataCredentialSetId === undefined ||
@@ -675,7 +679,7 @@ export class InMemoryTokenStore {
   deleteTokens = (async (query: {
     userId?: string;
     type?: string;
-    identifier?: string;
+    identifier?: string | RegExp;
     token?: string;
     metadataCredentialSetId?: string | null;
   }): Promise<{ acknowledged: boolean; deletedCount: number }> => {
@@ -684,7 +688,10 @@ export class InMemoryTokenStore {
       const match =
         (!query.userId || token.userId === query.userId) &&
         (!query.type || token.type === query.type) &&
-        (!query.identifier || token.identifier === query.identifier) &&
+        (!query.identifier ||
+          (query.identifier instanceof RegExp
+            ? query.identifier.test(token.identifier)
+            : token.identifier === query.identifier)) &&
         (!query.token || token.token === query.token) &&
         (query.metadataCredentialSetId === undefined ||
           (query.metadataCredentialSetId === null
