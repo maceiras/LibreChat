@@ -4,9 +4,9 @@ import type { AppConfig, IUser } from '@librechat/data-schemas';
 import type { Response } from 'express';
 import type { ParsedServerConfig } from '../mcp/types';
 import type { ServerRequest } from '../types/http';
+import { createScheduledOboGrantService, createLazyScheduledOboGrantService } from './obo';
 import { InMemoryTokenStore, MockKeyv } from '../mcp/__tests__/helpers/oauthTestServer';
 import { OboTokenResolutionError, resolveOboToken } from '../mcp/oauth/obo';
-import { createScheduledOboGrantService } from './obo';
 import { FlowStateManager } from '../flow/manager';
 
 jest.mock('@librechat/data-schemas', () => ({
@@ -66,6 +66,8 @@ function harness() {
         : { access_token: 'first', refresh_token: 'server-scoped-refresh', expires_in: 3600 },
   );
   let allowed = ['Files'];
+  let agentAllowed = true;
+  let baseAvailable = true;
   let server = config;
   const inspect = jest.fn(async (_agent, _user, _id, _server, onSelected) => onSelected(server));
   const service = createScheduledOboGrantService({
@@ -73,13 +75,16 @@ function harness() {
     flowManager: flow,
     getUser: async () => user,
     getSchedule: async () => row,
-    getAppConfig: async () =>
-      ({
-        mcpConfig: { Files: server },
-        interfaceConfig: { schedules: { use: true, oboServers: allowed } },
-      }) as Partial<AppConfig> as AppConfig,
+    getAppConfig: async (options) =>
+      options?.baseOnly && !baseAvailable
+        ? undefined
+        : ({
+            mcpConfig: { Files: server },
+            interfaceConfig: { schedules: { use: true, oboServers: allowed } },
+          } as Partial<AppConfig> as AppConfig),
     ensureConfigServers: async () => ({ Files: server }),
     getServerConfigs: async () => ({ Files: server }),
+    agentAccess: async () => (agentAllowed ? 'ok' : 'forbidden'),
     getRoleByName: async () =>
       ({
         permissions: {
@@ -114,6 +119,12 @@ function harness() {
     setAllowed: (names: string[]) => {
       allowed = names;
     },
+    setAgentAllowed: (allowed: boolean) => {
+      agentAllowed = allowed;
+    },
+    setBaseAvailable: (available: boolean) => {
+      baseAvailable = available;
+    },
     setServer: (replacement: ParsedServerConfig) => {
       server = replacement;
     },
@@ -121,6 +132,15 @@ function harness() {
 }
 
 describe('separately authorized scheduled OBO grants', () => {
+  it('does not construct credential storage merely because routes load', async () => {
+    const factory = jest.fn(() => harness().service);
+    const deferred = createLazyScheduledOboGrantService(factory);
+    deferred.setInspector(jest.fn(async () => []));
+    expect(factory).not.toHaveBeenCalled();
+    await deferred.resolve(user, { context, target });
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
   it('never enrolls or returns a token without the explicit live-session step', async () => {
     const { service, requestGrant, tokenStore } = harness();
     const provider = await service.resolve(user, { context, target });
@@ -186,6 +206,34 @@ describe('separately authorized scheduled OBO grants', () => {
     await service.revoke(user.id, row.id, 'Files');
     expect(tokenStore.getAll()).toEqual([]);
     await expect(provider()).rejects.toMatchObject({ reason: 'missing_upstream_provider' });
+  });
+
+  it('fails closed on revoked root-agent access and the missing base schedule policy', async () => {
+    const { service, row, setAgentAllowed, setBaseAvailable } = harness();
+    await service.enroll(user.id, row.id, 'Files', 'assertion');
+    row.enabled = true;
+    const provider = (await service.resolve(user, { context, target }))!;
+    setAgentAllowed(false);
+    await expect(provider()).rejects.toMatchObject({ reason: 'missing_upstream_provider' });
+    setAgentAllowed(true);
+    setBaseAvailable(false);
+    await expect(provider()).rejects.toMatchObject({ reason: 'missing_upstream_provider' });
+  });
+
+  it('keeps a transient credential-store read retryable instead of revoking the schedule', async () => {
+    const { service, row, tokenStore } = harness();
+    await service.enroll(user.id, row.id, 'Files', 'assertion');
+    row.enabled = true;
+    const provider = (await service.resolve(user, { context, target }))!;
+    const lookup = jest
+      .spyOn(tokenStore, 'findToken')
+      .mockRejectedValueOnce(new Error('store down'));
+    await expect(provider()).rejects.toMatchObject({
+      reason: 'session_refresh_failed',
+      retryable: true,
+    });
+    lookup.mockRestore();
+    await expect(provider()).resolves.toMatchObject({ access_token: 'first' });
   });
 
   it('refuses enrollment if the live OpenID session does not match the persisted owner', async () => {

@@ -68,6 +68,7 @@ interface GrantDeps {
     role?: string,
   ) => Promise<Record<string, ParsedServerConfig>>;
   getRoleByName: Parameters<typeof checkAccess>[0]['getRoleByName'];
+  agentAccess: (agentId: string, user: IUser) => Promise<'ok' | 'missing' | 'forbidden'>;
   getOpenIdConfig: () => OpenIdConfig | null;
   requestGrant: (
     config: OpenIdConfig,
@@ -231,26 +232,29 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
       throw missingGrant();
     if (user.id && user.id !== userId) throw missingGrant();
     user.id = userId;
-    const [limits, mcpAccess, scheduleAccess, agentAccess, config] = await Promise.all([
+    const roleLookup = user.role ? deps.getRoleByName(user.role) : Promise.resolve(null);
+    const getRoleByName: typeof deps.getRoleByName = () => roleLookup;
+    const [limits, mcpAccess, scheduleAccess, agentAccess, rootAccess, config] = await Promise.all([
       getPolicy(user),
       checkAccess({
         user,
         permissionType: PermissionTypes.MCP_SERVERS,
         permissions: [Permissions.USE],
-        getRoleByName: deps.getRoleByName,
+        getRoleByName,
       }),
       checkAccess({
         user,
         permissionType: PermissionTypes.SCHEDULES,
         permissions: [Permissions.USE],
-        getRoleByName: deps.getRoleByName,
+        getRoleByName,
       }),
       checkAccess({
         user,
         permissionType: PermissionTypes.AGENTS,
         permissions: [Permissions.USE],
-        getRoleByName: deps.getRoleByName,
+        getRoleByName,
       }),
+      deps.agentAccess(context.agentId, user),
       getServer(user, target.mcpServer),
     ]);
     if (
@@ -259,6 +263,7 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
       !mcpAccess ||
       !scheduleAccess ||
       !agentAccess ||
+      rootAccess !== 'ok' ||
       !config?.obo?.scopes ||
       config.obo.scopes !== target.scopes ||
       config.source === 'user' ||
@@ -722,5 +727,34 @@ export function createScheduledOboGrantService(deps: GrantDeps): ScheduledOboGra
     revokeFromRequest,
     purge,
     setInspector,
+  };
+}
+
+/** Keep the scheduled credential host out of ordinary API startup paths. Existing
+ * Schedules/index uses the same lazily constructed service pattern. */
+export function createLazyScheduledOboGrantService(
+  factory: () => ScheduledOboGrantService,
+): ScheduledOboGrantService {
+  let instance: ScheduledOboGrantService | undefined;
+  let inspector: ScheduleMCPPreflight | undefined;
+  const get = (): ScheduledOboGrantService => {
+    if (!instance) {
+      instance = factory();
+      if (inspector) instance.setInspector(inspector);
+    }
+    return instance;
+  };
+  return {
+    setInspector: (preflight) => {
+      inspector = preflight;
+      instance?.setInspector(preflight);
+    },
+    resolve: (...args) => get().resolve(...args),
+    enroll: (...args) => get().enroll(...args),
+    revoke: (...args) => get().revoke(...args),
+    enrollFromRequest: (...args) => get().enrollFromRequest(...args),
+    describeFromRequest: (...args) => get().describeFromRequest(...args),
+    revokeFromRequest: (...args) => get().revokeFromRequest(...args),
+    purge: (...args) => get().purge(...args),
   };
 }
