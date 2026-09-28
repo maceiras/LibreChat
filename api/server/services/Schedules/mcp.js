@@ -30,7 +30,7 @@ function createMCPPreflight(options = {}) {
     getServerConfigs: (userId, config, role) =>
       getMCPServersRegistry().getAllServerConfigs(userId, config, role),
     findPluginAuthsByKeys: methods.findPluginAuthsByKeys,
-    resolveUpstreamTokenProvider: options.resolveUpstreamTokenProvider,
+    resolveUpstreamTokenProvider: options.resolveUpstreamTokenProvider ?? require('./obo').resolve,
     connect: (connectionOptions) =>
       getMCPManager().getConnection({
         ...connectionOptions,

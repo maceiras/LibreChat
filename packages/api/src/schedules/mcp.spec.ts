@@ -99,6 +99,10 @@ function setup(tools = ['search_mcp_docs']) {
         signal?: AbortSignal;
         deadlineMs?: number;
         scheduleId?: string;
+        inspectOboTarget?: {
+          serverName: string;
+          onSelected: (config: ParsedServerConfig) => Promise<void>;
+        };
       },
     ) => preflight(agentId, user, { concurrency: 3, ...options }),
   };
@@ -150,6 +154,54 @@ it('lazily resolves an upstream token provider for an OBO preflight', async () =
   expect(deps.connect).toHaveBeenCalledWith(
     expect.objectContaining({ upstreamTokenProviderResolver: expect.any(Function) }),
   );
+});
+
+it('inspects only an accessible, selected operator-owned OBO target before enrollment', async () => {
+  const { check, deps } = setup(['search_mcp_docs']);
+  const selected = { ...server, source: 'yaml' as const, obo: { scopes: 'api://files/Read' } };
+  deps.getServerConfigs = jest.fn(async () => ({ docs: selected }));
+  deps.getAppConfig = jest.fn(
+    async () =>
+      ({
+        endpoints: { agents: { capabilities: [AgentCapabilities.tools] } },
+        mcpConfig: { docs: selected },
+      }) as Partial<AppConfig> as AppConfig,
+  );
+  const onSelected = jest.fn(async () => undefined);
+  await expect(
+    check('agent', principal, {
+      inspectOboTarget: {
+        serverName: 'docs',
+        onSelected,
+      },
+    }),
+  ).resolves.toEqual([{ server: 'docs', status: 'ready' }]);
+  expect(onSelected).toHaveBeenCalledWith(selected);
+  expect(deps.connect).not.toHaveBeenCalled();
+  await expect(
+    check('agent', principal, {
+      inspectOboTarget: {
+        serverName: 'other',
+        onSelected,
+      },
+    }),
+  ).rejects.toMatchObject({ code: 'mcp_configuration_missing' });
+  expect(onSelected).toHaveBeenCalledTimes(1);
+  deps.getAppConfig = jest.fn(
+    async () =>
+      ({
+        endpoints: { agents: { capabilities: [AgentCapabilities.tools] } },
+      }) as Partial<AppConfig> as AppConfig,
+  );
+  // Operator-owned YAML servers live in the registry rather than principal mcpConfig.
+  await expect(
+    check('agent', principal, {
+      inspectOboTarget: {
+        serverName: 'docs',
+        onSelected,
+      },
+    }),
+  ).resolves.toEqual([{ server: 'docs', status: 'ready' }]);
 });
 
 it('reports missing unattended OBO credentials without offering a browser reconnect', async () => {

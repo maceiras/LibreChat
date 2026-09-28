@@ -1,0 +1,43 @@
+const client = require('openid-client');
+const { createScheduledOboGrantService } = require('@librechat/api');
+const { CacheKeys } = require('librechat-data-provider');
+const { getMCPServersRegistry, getFlowStateManager } = require('~/config');
+const { getAppConfig } = require('~/server/services/Config/app');
+const { getOpenIdConfig } = require('~/strategies/openidStrategy');
+const { createOboTrustChecker } = require('~/server/services/OboPolicyService');
+const { getLogStores } = require('~/cache');
+const { getLimits, isUserDeleting } = require('./index');
+const methods = require('~/models');
+
+module.exports = createScheduledOboGrantService({
+  tokens: {
+    findToken: methods.findToken,
+    createToken: methods.createToken,
+    updateToken: methods.updateToken,
+    deleteTokens: methods.deleteTokens,
+  },
+  flowManager: getFlowStateManager(getLogStores(CacheKeys.FLOWS)),
+  getUser: (id) => methods.findUser({ _id: id }),
+  getSchedule: (id, userId) => methods.getScheduleById(id, userId),
+  getLimits,
+  getAppConfig,
+  ensureConfigServers: (config) => getMCPServersRegistry().ensureConfigServers(config),
+  getServerConfigs: (userId, config, role) =>
+    getMCPServersRegistry().getAllServerConfigs(userId, config, role),
+  getRoleByName: methods.getRoleByName,
+  getOpenIdConfig,
+  requestGrant: (config, type, parameters) => client.genericGrantRequest(config, type, parameters),
+  inspect: async (agentId, user, scheduleId, serverName, onSelected) => {
+    await require('./mcp')(agentId, user, {
+      scheduleId,
+      concurrency: 3,
+      inspectOboTarget: { serverName, onSelected },
+    });
+  },
+  isOwnerDeleting: isUserDeleting,
+  pauseSchedule: (id, userId, revision) =>
+    methods.updateScheduleById(id, userId, { enabled: false }, undefined, {
+      expectedConfigRevision: revision,
+    }),
+  isOboConfigTrusted: (config) => createOboTrustChecker()(config),
+});

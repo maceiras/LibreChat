@@ -52,6 +52,8 @@ export interface SchedulesHandlersDeps {
    * runs, and erases once drained. See ScheduleDeleteResult for the honest states.
    */
   deleteSchedule: (id: string, userId: string) => Promise<ScheduleDeleteResult>;
+  /** Erases all separately enrolled grants, including targets removed from current policy. */
+  purgeOboGrants?: (userId: string, scheduleId: string) => Promise<void>;
   /** Whether this user's account deletion has begun. Fail-closed (unknown == true). */
   isUserDeleting: (userId: string) => Promise<boolean>;
 }
@@ -588,6 +590,7 @@ export function createSchedulesHandlers(deps: SchedulesHandlersDeps): SchedulesH
         minIntervalMinutes: limits.minIntervalMinutes,
         requireProject: limits.requireProject,
         ...(limits.projectId != null && { projectId: limits.projectId }),
+        ...(limits.oboServers?.length && { oboServers: limits.oboServers }),
       },
     });
   }
@@ -1125,7 +1128,16 @@ export function createSchedulesHandlers(deps: SchedulesHandlersDeps): SchedulesH
     // Quiesce-then-erase: disable + mark deleting (stops new claims, hides it),
     // abort in-flight loopback jobs, and erase once drained — so a live run's
     // evidence is never destroyed out from under it.
-    const result = await deps.deleteSchedule(id, requestUser(req).id);
+    const userId = requestUser(req).id;
+    const result = await deps.deleteSchedule(id, userId);
+    try {
+      await deps.purgeOboGrants?.(userId, id);
+    } catch {
+      res
+        .status(503)
+        .json({ error: 'Schedule stopped but offline OBO grant cleanup failed. Retry deletion.' });
+      return;
+    }
     if (result === 'not_found') {
       res.status(404).json({ error: 'Schedule not found' });
       return;

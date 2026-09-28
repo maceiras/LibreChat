@@ -2318,6 +2318,8 @@ export const interfaceSchema = z
           fireConcurrency: z.number().int().min(1).optional(),
           mcpPreflightConcurrency: z.number().int().min(1).max(10).optional(),
           mcpPreflightTimeoutMs: z.number().int().min(1000).max(600000).optional(),
+          /** Exact names of OBO MCP servers eligible for separately authorized scheduled grants. */
+          oboServers: z.array(z.string().trim().min(1)).max(20).optional(),
           /** Refuse schedules that are not filed under a chat project. Enforced on
            *  create/update AND at every fire, so raising it later stops schedules
            *  that predate the policy instead of grandfathering them. */

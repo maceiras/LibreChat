@@ -40,10 +40,14 @@ export type OboTokenResolver = (
  *   - throws: refresh was attempted and the IdP rejected it. Caller wraps as
  *     `session_refresh_failed`.
  */
+/** Only the trusted scheduled-grant host can return a downstream token. Never treat it as
+ * an OBO assertion or as the OpenID browser session's bearer. */
+export type OboProviderTokens = OIDCTokens & { readonly scheduledObo?: true };
+
 export type UpstreamTokenProvider = (options?: {
   forceRefresh?: boolean;
   signal?: AbortSignal;
-}) => Promise<OIDCTokens | null>;
+}) => Promise<OboProviderTokens | null>;
 
 /** Target resolved from server configuration after the OBO trust check. Scopes are not an audience. */
 export interface UpstreamTokenTarget {
@@ -298,14 +302,12 @@ export async function resolveOboToken(
   identityContext?: AuthIdentityContext,
   forceRefresh = false,
 ): Promise<MCPOAuthTokens> {
-  let liveTokens: OIDCTokens | null;
+  let liveTokens: OboProviderTokens | null;
   try {
-    liveTokens = await upstreamTokenProvider();
+    liveTokens = await upstreamTokenProvider({ forceRefresh });
   } catch (error) {
     if (isAbortError(error)) throw error;
-    if (error instanceof OboTokenResolutionError && error.reason === 'missing_upstream_provider') {
-      throw error;
-    }
+    if (error instanceof OboTokenResolutionError) throw error;
     logger.error('[OBO] Upstream session refresh failed:', error);
     const retryable = isRetryableOboExchangeError(error);
     throw new OboTokenResolutionError(
@@ -316,6 +318,25 @@ export async function resolveOboToken(
       retryable,
       error,
     );
+  }
+
+  if (liveTokens?.scheduledObo === true) {
+    const now = Date.now();
+    const expiresAt = liveTokens.expires_at != null ? liveTokens.expires_at * 1000 : 0;
+    const usableUntil = getSkewedTokenExpiresAtMs(expiresAt, now);
+    if (!liveTokens.access_token || usableUntil <= now) {
+      throw new OboTokenResolutionError(
+        'session_refresh_failed',
+        'The scheduled OBO grant did not provide a usable downstream token.',
+        true,
+      );
+    }
+    return {
+      access_token: liveTokens.access_token,
+      token_type: 'Bearer',
+      obtained_at: now,
+      expires_at: usableUntil,
+    };
   }
 
   const tokenInfo = buildUpstreamTokenInfo(user, liveTokens);

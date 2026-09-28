@@ -79,6 +79,7 @@ type ScheduleFormValues = {
    *  user who tries a preset does not lose the expression they typed. */
   expression: string;
   timezone: string;
+  prepareObo: boolean;
 };
 
 const FREQUENCY_LABELS: Record<ScheduleFrequency, TranslationKeys> = {
@@ -118,6 +119,7 @@ const getDefaultValues = (schedule?: TSchedule): ScheduleFormValues => {
       daysOfWeek: DEFAULT_WEEKLY_DAYS,
       expression: DEFAULT_CRON,
       timezone: localTimezone,
+      prepareObo: false,
     };
   }
   const identity = {
@@ -128,6 +130,7 @@ const getDefaultValues = (schedule?: TSchedule): ScheduleFormValues => {
     // A stored row always has one; the fallback only covers a legacy row written
     // before the field existed, which would otherwise render an empty picker.
     timezone: schedule.timezone || localTimezone,
+    prepareObo: false,
   };
   const cadence = schedule.cadence;
   if (isCronCadence(cadence)) {
@@ -435,7 +438,7 @@ export default function ScheduleDialog({
       cadence: buildCadence(values),
       timezone: values.timezone,
       target: 'new' as const,
-      enabled: true,
+      enabled: !values.prepareObo,
     };
     // STABLE across retries of the SAME intent, which is the whole point: the server
     // commits the row and arms it in two writes, so a failure between them leaves the
@@ -744,6 +747,13 @@ export default function ScheduleDialog({
                 {localize('com_ui_schedule_target_new_chat')}
               </p>
             </div>
+
+            {schedule == null && (schedulesData?.limits.oboServers?.length ?? 0) > 0 && (
+              <label className="flex items-start gap-2 text-sm text-text-primary">
+                <input type="checkbox" className="mt-1" {...register('prepareObo')} />
+                <span>{localize('com_ui_schedule_obo_prepare')}</span>
+              </label>
+            )}
 
             <Controller
               name="prompt"

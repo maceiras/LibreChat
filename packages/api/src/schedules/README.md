@@ -44,10 +44,45 @@ The schedule card shows failed servers and links to the selected agent for recov
 A pure pause remains available even when MCP validation fails. This change does not
 re-enable existing schedules automatically or repair credentials on the user's behalf.
 
+## Separately authorized OBO refresh grants
+
+An operator may add `interface.schedules.oboServers: ["ServerName"]` to the
+config for a specific principal. The default is no OBO servers. An eligible
+server must be an operator-owned MCP config with `obo.scopes`, and its provider
+must actually issue a **downstream** refresh token for an OBO exchange requesting
+those scopes plus `offline_access`. A checked permission alone does not mint one.
+
+To set one up, create the schedule paused using the dialog's OBO setup checkbox.
+While signed in with a current OpenID session, click **Authorize offline** on
+the saved card for the exact named server. This POST uses the live user access
+token once as an OBO assertion. It saves only the encrypted downstream OBO
+refresh grant under the owner, schedule id and server name. It never persists
+the browser login refresh token, and does not present a downstream token as an
+upstream assertion. The backend validates the agent's selected MCP tools,
+owner/tenant, permissions, server config and scopes before storing it. The
+server must issue a refresh token; otherwise the enrollment fails without
+creating a grant. Enable the schedule after authorization. Repeat for each
+required OBO server.
+
+Preflight, execution and tool-call recovery use the scoped downstream credential.
+An expired access token is renewed via the provider's refresh-token grant and
+rotated under the existing cross-replica MCP OAuth credential lease. Each use
+checks the current schedule owner, root agent, tenant, server, scopes and
+operator allowlist. An operator removing a name or changing scopes blocks
+future use; the owner can revoke a grant explicitly from the card, which
+pauses the schedule. A missing
+or invalid grant never falls back to the browser session. Existing schedules
+and non-OBO servers keep their previous behavior. A provider that does not
+support the separate offline grant continues to report missing unattended
+authorization. Tests simulate a later access-token expiry; verification against
+an actual provider with recurring runs remains outstanding.
+
 ## Host token-provider context
 
 `createMCPPreflight` and `createInitializeClient` accept a
-`HostUpstreamTokenProviderResolver`. The default application does not install one.
+`HostUpstreamTokenProviderResolver`. The default application installs the
+separately authorized scheduled OBO resolver above; with no grant it still fails
+closed. Operators may supply a different host-owned resolver.
 The host receives the persisted/authenticated user and these optional fields:
 
 ```ts
@@ -84,4 +119,6 @@ Current schedules execute with their owner's authority, hence `delegated`. Dedic
 authorization requires a separate implementation. Scopes are not an STS audience; audience
 mapping and authorization remain the host's responsibility.
 
-This interface adds no token store, STS exchange, consent API, or new MCP credential mode.
+The host contract itself is not a grant. The separately authorized token store
+and enrollment/revocation endpoints above use it without an STS exchange or a
+new identity platform.

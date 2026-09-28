@@ -528,7 +528,13 @@ export function createScheduleMCPPreflight(deps: ScheduleMCPDeps): ScheduleMCPPr
         name.includes(Constants.mcp_delimiter) &&
         !name.startsWith(`${Constants.mcp_server}${Constants.mcp_delimiter}`),
     );
-    if (selectedTools.length === 0) return [];
+    if (selectedTools.length === 0) {
+      if (options.inspectOboTarget)
+        throw new ScheduleMCPError([
+          { server: options.inspectOboTarget.serverName, status: 'mcp_configuration_missing' },
+        ]);
+      return [];
+    }
 
     const effectiveConfig = await loadAppConfig();
     const rawConfig = effectiveConfig?.mcpConfig ?? {};
@@ -639,6 +645,11 @@ export function createScheduleMCPPreflight(deps: ScheduleMCPDeps): ScheduleMCPPr
     const selectedRawConfig = Object.fromEntries(
       Object.entries(rawConfig).filter(([serverName]) => selected.has(serverName)),
     );
+    if (options.inspectOboTarget && !selected.has(options.inspectOboTarget.serverName)) {
+      throw new ScheduleMCPError([
+        { server: options.inspectOboTarget.serverName, status: 'mcp_configuration_missing' },
+      ]);
+    }
     const requestProbeLimit = createConcurrencyLimiter(options.concurrency);
     const config = await deps.ensureConfigServers(selectedRawConfig, (task) =>
       requestProbeLimit(() => {
@@ -653,6 +664,20 @@ export function createScheduleMCPPreflight(deps: ScheduleMCPDeps): ScheduleMCPPr
     const shadowed = findShadowedServerNames(
       Array.from(new Set([...configNames, ...Object.keys(servers)])),
     );
+    if (options.inspectOboTarget) {
+      const { serverName, onSelected } = options.inspectOboTarget;
+      const server = servers[serverName];
+      if (
+        !server?.obo?.scopes ||
+        shadowed.has(serverName) ||
+        server.source === 'user' ||
+        (server.dbId && server.source !== 'config')
+      ) {
+        throw new ScheduleMCPError([{ server: serverName, status: 'mcp_configuration_missing' }]);
+      }
+      await onSelected(server);
+      return [{ server: serverName, status: 'ready' }];
+    }
     throwIfAborted();
     const auth = await getPluginAuthMap({
       userId: user.id,

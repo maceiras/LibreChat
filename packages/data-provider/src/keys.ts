@@ -165,6 +165,7 @@ export enum MutationKeys {
   updateSchedule = 'updateSchedule',
   deleteSchedule = 'deleteSchedule',
   runSchedule = 'runSchedule',
+  scheduledObo = 'scheduledObo',
   pairCodeEnvironment = 'pairCodeEnvironment',
   updateCodeEnvironmentSettings = 'updateCodeEnvironmentSettings',
   deleteCodeEnvironment = 'deleteCodeEnvironment',
