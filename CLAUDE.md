@@ -1,5 +1,13 @@
 # LibreChat
 
+## EPTM Fork Changelog
+
+- The primary integration branch for this fork is `local_main`.
+- Update [CHANGELOG.eptm.md](CHANGELOG.eptm.md) alongside each meaningful EPTM change.
+- Write concise entries in English explaining the behavior changed and why, with relevant configuration changes or known limitations.
+- Add pending changes under `Unreleased`. When integrating them into `local_main`, move them into a dated entry, newest first. Add commit references when available.
+- Record only implemented changes and checks actually performed. Keep the journal focused on this fork; deployment changes belong in the parent repository.
+
 ## Project Overview
 
 LibreChat is a monorepo with the following key workspaces:

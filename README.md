@@ -52,6 +52,11 @@
 </p>
 
 
+## EPTM fork
+
+Our primary integration branch is `local_main`, based on LibreChat `v0.8.7`.
+See the [EPTM changelog](CHANGELOG.eptm.md) for our changes and known limitations.
+
 # ✨ Features
 
 - 🖥️ **UI & Experience** inspired by ChatGPT with enhanced design and features
