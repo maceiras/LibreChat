@@ -5,6 +5,20 @@ Current base: LibreChat `v0.8.7` (`9e74cc0`). Entries are listed newest first.
 
 ## Unreleased
 
+- **Code Interpreter image previews**: preserve dimensions and detected MIME types
+  for generated PNG, JPEG, GIF, and WebP files, and store them on the existing image
+  path using the configured image storage strategy. Images render inline during
+  streaming and after reload without changing the original bytes. Invalid or
+  unsupported images remain downloadable. Existing attachments are not migrated;
+  regenerate them after rebuilding and restarting the backend to get previews.
+
+**Image preview validation:** 154 targeted tests passed across file imports,
+attachment/image rendering, agent initialization, SSE callbacks, and MIME filtering.
+The image tests use real PNG/JPEG/GIF/WebP buffers and the real frontend image
+component. API and frontend TypeScript, changed-file ESLint, and the API build
+passed. Corrected the incomplete request fixture in the existing MIME-filter test
+so the full API typecheck can run. No live provider call or deployment was performed.
+
 - **OpenAI Responses Code Interpreter**: support `preset.code_execution` in model
   specs, conversations, and saved presets. When true, offer the OpenAI-hosted
   `code_interpreter` tool with an automatic container and use Responses. False

@@ -2,7 +2,7 @@ import React from 'react';
 import { RecoilRoot, useRecoilValue } from 'recoil';
 import { FileContext } from 'librechat-data-provider';
 import { render, screen, fireEvent, act } from '@testing-library/react';
-import type { TAttachment } from 'librechat-data-provider';
+import type { TAttachment, TFile } from 'librechat-data-provider';
 import type { MutableSnapshot } from 'recoil';
 import Attachment, { AttachmentGroup } from '../Attachment';
 import ContainerFiles from '../../ContainerFiles';
@@ -40,11 +40,6 @@ jest.mock('~/components/Chat/Input/Files/FilePreview', () => ({
   default: () => <div data-testid="file-preview" />,
 }));
 
-jest.mock('~/components/Chat/Messages/Content/Image', () => ({
-  __esModule: true,
-  default: ({ altText }: { altText?: string }) => <img alt={altText ?? ''} data-testid="image" />,
-}));
-
 jest.mock('~/components/Messages/Content/Mermaid/Mermaid', () => ({
   __esModule: true,
   default: ({ children }: { children: string }) => (
@@ -59,7 +54,7 @@ jest.mock('~/utils', () => ({
   isArtifactRoute: () => false,
 }));
 
-const baseAttachment = (overrides: Partial<TAttachment> = {}): TAttachment =>
+const baseAttachment = (overrides: Partial<TAttachment> | Partial<TFile> = {}): TAttachment =>
   ({
     file_id: 'file-1',
     filename: 'unset',
@@ -755,7 +750,7 @@ describe('AttachmentGroup routing', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     const panel = document.getElementById(toggle.getAttribute('aria-controls') ?? '');
     expect(panel?.firstElementChild).toHaveAttribute('aria-hidden', 'true');
-    expect(screen.getByTestId('image')).toBeInTheDocument();
+    expect(screen.getByRole('img')).toBeInTheDocument();
     expect(screen.getAllByTestId('file-container').map((chip) => chip.textContent)).not.toContain(
       'c.json',
     );
@@ -878,6 +873,37 @@ describe('AttachmentGroup routing', () => {
 });
 
 describe('OpenAI container attachments', () => {
+  it('renders a PNG inline using its stored image URL and retains the preview after reload', () => {
+    const attachments = [
+      baseAttachment({
+        file_id: 'hosted-chart',
+        filename: 'chart.png',
+        filepath: '/images/owner/hosted-chart.png',
+        type: 'image/png',
+        width: 640,
+        height: 320,
+        context: FileContext.code_interpreter,
+      }),
+    ];
+    const view = renderWith(<ContainerFiles attachments={attachments} />);
+    expect(screen.getByRole('img', { name: 'chart.png' })).toHaveAttribute(
+      'src',
+      '/images/owner/hosted-chart.png',
+    );
+    expect(screen.queryByTestId('file-container')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View chart.png in dialog' })).toBeInTheDocument();
+
+    view.unmount();
+    renderWith(<ContainerFiles attachments={JSON.parse(JSON.stringify(attachments))} />, {
+      streaming: false,
+    });
+    expect(screen.getByRole('img', { name: 'chart.png' })).toHaveAttribute(
+      'src',
+      '/images/owner/hosted-chart.png',
+    );
+    expect(screen.queryByTestId('file-container')).not.toBeInTheDocument();
+  });
+
   it('shows hosted output downloads without a LibreChat tool call, including after reload', () => {
     const attachments = [
       baseAttachment({

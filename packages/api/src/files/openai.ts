@@ -1,10 +1,17 @@
 import { z } from 'zod';
+import sharp from 'sharp';
 import path from 'node:path';
 import { Types } from 'mongoose';
 import { randomUUID } from 'node:crypto';
 import { logger } from '@librechat/data-schemas';
 import { GraphEvents, Providers, CustomOpenAIClient } from '@librechat/agents';
-import { FileContext, FileSources, inferMimeType, megabyte } from 'librechat-data-provider';
+import {
+  FileContext,
+  FileSources,
+  imageExtRegex,
+  inferMimeType,
+  megabyte,
+} from 'librechat-data-provider';
 import type { EventHandler, ModelEndData, OpenAIClientOptions } from '@librechat/agents';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { SaveBufferFn } from '~/storage/types';
@@ -42,10 +49,29 @@ type ContainerCitation = z.infer<typeof containerCitationSchema>;
 interface OpenAIFileHandlerOptions {
   req: ServerRequest;
   handler: EventHandler;
+  imageSource?: string;
   getStrategyFunctions: (source: string) => { saveBuffer?: SaveBufferFn };
   createFile: (file: Partial<IMongoFile>, disableTTL?: boolean) => Promise<IMongoFile | null>;
   getRetentionExpiry: (req: ServerRequest) => Promise<RetentionExpiry>;
   onFile: (file: IMongoFile) => void | Promise<void>;
+}
+
+async function getImageMetadata(
+  buffer: Buffer,
+  filename: string,
+): Promise<Pick<IMongoFile, 'width' | 'height' | 'type'> | undefined> {
+  if (!imageExtRegex.test(filename)) {
+    return;
+  }
+  try {
+    const { format, width, height, pageHeight } = await sharp(buffer).metadata();
+    if (!format || !['png', 'jpeg', 'gif', 'webp'].includes(format) || !width || !height) {
+      return;
+    }
+    return { type: `image/${format}`, width, height: pageHeight ?? height };
+  } catch (error) {
+    logger.warn('[OpenAI Code Interpreter] Unable to inspect image; keeping download', error);
+  }
 }
 
 /** Read incrementally so missing or incorrect Content-Length cannot bypass the file limit. */
@@ -100,6 +126,7 @@ function getContainerCitations(output: NonNullable<ModelEndData>['output']): Con
 export function createOpenAIFileHandler({
   req,
   handler,
+  imageSource,
   onFile,
   createFile,
   getStrategyFunctions,
@@ -131,8 +158,7 @@ export function createOpenAIFileHandler({
         timeout: 30_000,
         maxRetries: 1,
       });
-      const source = req.config?.fileStrategy ?? FileSources.local;
-      const { saveBuffer } = getStrategyFunctions(source);
+      const defaultSource = req.config?.fileStrategy ?? FileSources.local;
       const limit =
         getConfiguredFileSizeLimit(req, { provider: context.provider }) ?? 20 * megabyte;
       for (const citation of citations) {
@@ -142,9 +168,6 @@ export function createOpenAIFileHandler({
         }
         processed.add(key);
         try {
-          if (!saveBuffer) {
-            throw new Error(`File storage is unavailable for strategy ${source}`);
-          }
           const timeout = AbortSignal.timeout(30_000);
           const response = await client.containers.files.content.retrieve(
             citation.file_id,
@@ -154,16 +177,25 @@ export function createOpenAIFileHandler({
           const buffer = await readFileContent(response, limit);
           const filename = path.posix.basename(citation.filename.replace(/\\/g, '/'));
           const file_id = randomUUID();
-          const type = inferMimeType(filename, '') || 'application/octet-stream';
+          const image = await getImageMetadata(buffer, filename);
+          const source = image ? (imageSource ?? defaultSource) : defaultSource;
+          const { saveBuffer } = getStrategyFunctions(source);
+          if (!saveBuffer) {
+            throw new Error(`File storage is unavailable for strategy ${source}`);
+          }
+          const type = image?.type ?? (inferMimeType(filename, '') || 'application/octet-stream');
+          const extension = image
+            ? `.${type.slice('image/'.length)}`
+            : path
+                .extname(filename)
+                .replace(/[^.a-zA-Z0-9]/g, '')
+                .slice(0, 16);
           const filepath = await saveBuffer({
             userId: user.id,
             tenantId: user.tenantId,
             buffer,
-            fileName: `${file_id}${path
-              .extname(filename)
-              .replace(/[^.a-zA-Z0-9]/g, '')
-              .slice(0, 16)}`,
-            basePath: 'uploads',
+            fileName: `${file_id}${extension}`,
+            basePath: image ? 'images' : 'uploads',
           });
           const file = await createFile(
             {
@@ -171,6 +203,7 @@ export function createOpenAIFileHandler({
               filename,
               filepath,
               type,
+              ...(image && { width: image.width, height: image.height }),
               source,
               bytes: buffer.length,
               user: new Types.ObjectId(user.id),
