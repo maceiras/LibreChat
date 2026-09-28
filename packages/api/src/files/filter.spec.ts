@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { Providers } from '@librechat/agents';
-import { EModelEndpoint } from 'librechat-data-provider';
+import { EModelEndpoint, FileSources } from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { ServerRequest } from '~/types';
 import { filterFilesByEndpointConfig } from './filter';
@@ -807,6 +807,27 @@ describe('filterFilesByEndpointConfig', () => {
   });
 
   describe('MIME type filtering', () => {
+    it('keeps extracted text outside the provider MIME list while rejecting the raw file', () => {
+      const req = {
+        config: {
+          fileConfig: {
+            endpoints: {
+              openAI: { supportedMimeTypes: ['^application/pdf$'], fileSizeLimit: 1 },
+            },
+          },
+        },
+      } as ServerRequest;
+      const raw = { ...createMockFile('notes.txt'), type: 'text/plain', source: FileSources.local };
+      const extracted = { ...raw, source: FileSources.text, text: 'Extracted content' };
+      const oversized = { ...extracted, bytes: 2 * 1024 * 1024 };
+      expect(
+        filterFilesByEndpointConfig(req, {
+          files: [raw, extracted, oversized],
+          endpoint: 'openAI',
+        }),
+      ).toEqual([extracted]);
+    });
+
     it('should filter out files with unsupported MIME types', () => {
       const req = {
         config: {

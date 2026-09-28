@@ -4,6 +4,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { PassThrough } = require('stream');
+const FormData = require('form-data');
+const { EToolResources, mergeFileConfig } = require('librechat-data-provider');
 const { createMulterInstance, storage, importFileFilter, createFileFilter } = require('./multer');
 
 // Mock only the config service that requires external dependencies
@@ -240,6 +243,49 @@ describe('Multer Configuration', () => {
   });
 
   describe('File Filter with Real defaultFileConfig', () => {
+    it.each([
+      [undefined, 'text/plain', false],
+      [EToolResources.context, 'text/plain', true],
+      [EToolResources.context, 'application/octet-stream', false],
+      [undefined, 'application/pdf', true],
+    ])('validates %s / %s against the upload destination', (toolResource, mimetype, accepted) => {
+      const config = mergeFileConfig({
+        endpoints: { openAI: { supportedMimeTypes: ['^application/pdf$'] } },
+        text: { supportedMimeTypes: ['^text/plain$'] },
+        ocr: { supportedMimeTypes: [] },
+      });
+      const callback = jest.fn();
+      mockReq.body = { endpoint: 'openAI', tool_resource: toolResource };
+      createFileFilter(config)(mockReq, { ...mockFile, mimetype }, callback);
+      expect(callback).toHaveBeenCalledWith(accepted ? null : expect.any(Error), accepted);
+    });
+
+    it('accepts a real multipart text fallback with routing metadata before the file', async () => {
+      mockReq.config.fileConfig = {
+        endpoints: { openAI: { supportedMimeTypes: ['^application/pdf$'] } },
+        text: { supportedMimeTypes: ['^text/plain$'] },
+      };
+      require('~/server/services/Config').getAppConfig.mockResolvedValue(mockReq.config);
+      const form = new FormData();
+      form.append('endpoint', 'openAI');
+      form.append('tool_resource', EToolResources.context);
+      form.append('file', Buffer.from('Fallback text'), {
+        filename: 'notes.txt',
+        contentType: 'text/plain',
+      });
+      const req = Object.assign(new PassThrough(), mockReq, {
+        method: 'POST',
+        headers: { ...form.getHeaders(), 'content-length': form.getLengthSync() },
+      });
+      const upload = (await createMulterInstance()).single('file');
+      await new Promise((resolve, reject) => {
+        upload(req, {}, (error) => (error ? reject(error) : resolve()));
+        form.pipe(req);
+      });
+      expect(req.body.tool_resource).toBe(EToolResources.context);
+      expect(fs.readFileSync(req.file.path, 'utf8')).toBe('Fallback text');
+    });
+
     it('should use real fileConfig.checkType for validation', async () => {
       // Test with actual librechat-data-provider functions
       const {

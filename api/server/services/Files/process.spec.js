@@ -144,6 +144,7 @@ const { getStrategyFunctions } = require('~/server/services/Files/strategies');
 const { uploadVectors } = require('./VectorDB/crud');
 const db = require('~/models');
 const {
+  filterFile,
   processAgentFileUpload,
   processDeleteRequest,
   processFileURL,
@@ -159,6 +160,55 @@ const ODS_MIME = 'application/vnd.oasis.opendocument.spreadsheet';
 const ODT_MIME = 'application/vnd.oasis.opendocument.text';
 const ODP_MIME = 'application/vnd.oasis.opendocument.presentation';
 const ODG_MIME = 'application/vnd.oasis.opendocument.graphics';
+
+describe('filterFile upload destinations', () => {
+  const config = {
+    endpoints: { openAI: { supportedMimeTypes: ['^application/pdf$'], fileSizeLimit: 1 } },
+    text: { supportedMimeTypes: ['^text/plain$'] },
+    ocr: { supportedMimeTypes: [] },
+  };
+  beforeEach(() => {
+    mergeFileConfig.mockImplementation(
+      jest.requireActual('librechat-data-provider').mergeFileConfig,
+    );
+  });
+
+  const request = (toolResource, mimetype = 'text/plain') => ({
+    body: {
+      endpoint: 'openAI',
+      tool_resource: toolResource,
+      file_id: '550e8400-e29b-41d4-a716-446655440000',
+    },
+    file: { size: 100, mimetype },
+    config: { fileConfig: config },
+  });
+
+  it('accepts text fallback outside the provider allowlist', () => {
+    expect(() => filterFile({ req: request(EToolResources.context) })).not.toThrow();
+  });
+
+  it('rejects the same format when requested as a provider upload', () => {
+    expect(() => filterFile({ req: request(undefined) })).toThrow('Unsupported file type');
+  });
+
+  it('rejects unsupported binary files even when text processing is requested', () => {
+    expect(() =>
+      filterFile({ req: request(EToolResources.context, 'application/octet-stream') }),
+    ).toThrow('Unsupported file type');
+  });
+
+  it('preserves the size limit for text fallback', () => {
+    const req = request(EToolResources.context);
+    req.file.size = 2 * 1024 * 1024;
+    expect(() => filterFile({ req })).toThrow('File size limit');
+  });
+
+  it('rejects text fallback when the endpoint is disabled', () => {
+    const req = request(EToolResources.context);
+    req.config.fileConfig = { ...config, endpoints: { openAI: { disabled: true } } };
+    expect(() => filterFile({ req })).toThrow();
+  });
+});
 
 const makeReq = ({ mimetype = PDF_MIME, ocrConfig = null, interfaceConfig, body } = {}) => ({
   user: { id: 'user-123', tenantId: 'tenant-a' },

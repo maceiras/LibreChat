@@ -3,7 +3,8 @@ import { FileUpload, TooltipAnchor, AttachmentIcon } from '@librechat/client';
 import type { TConversation } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
 import { useShortcutAriaKey, useShortcutHint } from '~/hooks/useKeyboardShortcuts';
-import { useFileHandlingNoChatContext, useLocalize } from '~/hooks';
+import { useFileHandlingNoChatContext } from '~/hooks/Files/useFileHandling';
+import useLocalize from '~/hooks/useLocalize';
 import { cn } from '~/utils';
 
 const AttachFile = ({
@@ -47,15 +48,6 @@ const AttachFile = ({
             className={cn(
               'flex size-9 items-center justify-center rounded-full p-1 transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-opacity-50',
             )}
-            onKeyDownCapture={(e) => {
-              if (!inputRef.current) {
-                return;
-              }
-              if (e.key === 'Enter' || e.key === ' ') {
-                inputRef.current.value = '';
-                inputRef.current.click();
-              }
-            }}
             onClick={() => {
               if (!inputRef.current) {
                 return;

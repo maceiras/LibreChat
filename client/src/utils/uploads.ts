@@ -5,6 +5,7 @@ import {
   EModelEndpoint,
   isBedrockDocumentType,
   isPermissiveMimeConfig,
+  getUploadMimeTypes,
   isDocumentSupportedProvider,
   fileConfig as defaultFileConfig,
 } from 'librechat-data-provider';
@@ -57,7 +58,10 @@ export function supportsProviderUpload(
   if (provider === Providers.BEDROCK || endpointType === EModelEndpoint.bedrock) {
     return isBedrockDocumentType(type);
   }
-  if (isPermissiveMimeConfig(endpointFileConfig?.supportedMimeTypes)) {
+  if (
+    endpointFileConfig?.hasCustomMimeTypes ||
+    isPermissiveMimeConfig(endpointFileConfig?.supportedMimeTypes)
+  ) {
     return true;
   }
   if (
@@ -81,12 +85,11 @@ export function getDefaultUploadToolResource(
   if (!options.contextEnabled || options.endpointFileConfig?.disabled === true) {
     return null;
   }
-  const config = options.fileConfig ?? defaultFileConfig;
   const type = inferMimeType(file.name, file.type);
-  const textTypes = [
-    ...(config.text?.supportedMimeTypes ?? []),
-    ...(config.ocr?.supportedMimeTypes ?? []),
-    ...(config.stt?.supportedMimeTypes ?? []),
-  ];
+  const textTypes = getUploadMimeTypes({
+    fileConfig: options.fileConfig,
+    endpointFileConfig: options.endpointFileConfig ?? {},
+    toolResource: EToolResources.context,
+  });
   return type && defaultFileConfig.checkType(type, textTypes) ? EToolResources.context : null;
 }

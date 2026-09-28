@@ -7,6 +7,7 @@ const {
   mergeFileConfig,
   inferMimeType,
   getEndpointFileConfig,
+  getUploadMimeTypes,
   fileConfig: defaultFileConfig,
 } = require('librechat-data-provider');
 const { getAppConfig } = require('~/server/services/Config');
@@ -75,7 +76,12 @@ const createFileFilter = (customFileConfig) => {
       endpointType,
     });
 
-    if (!defaultFileConfig.checkType(mimeType, endpointFileConfig.supportedMimeTypes)) {
+    const mimeTypes = getUploadMimeTypes({
+      fileConfig: customFileConfig,
+      endpointFileConfig,
+      toolResource: req.body.tool_resource,
+    });
+    if (!defaultFileConfig.checkType(mimeType, mimeTypes)) {
       return cb(new Error('Unsupported file type: ' + (file.mimetype || mimeType)), false);
     }
 

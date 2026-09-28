@@ -16,6 +16,7 @@ const {
   removeNullishValues,
   isAssistantsEndpoint,
   getEndpointFileConfig,
+  getUploadMimeTypes,
   documentParserMimeTypes,
 } = require('librechat-data-provider');
 const { logger, runAsSystem } = require('@librechat/data-schemas');
@@ -1306,7 +1307,11 @@ function filterFile({ req, image, isAvatar }) {
 
   const isSupportedMimeType = fileConfig.checkType(
     file.mimetype,
-    endpointFileConfig.supportedMimeTypes,
+    getUploadMimeTypes({
+      fileConfig,
+      endpointFileConfig,
+      toolResource: isAvatar ? undefined : req.body.tool_resource,
+    }),
   );
 
   if (!isSupportedMimeType) {

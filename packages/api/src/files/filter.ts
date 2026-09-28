@@ -1,4 +1,9 @@
-import { getEndpointFileConfig, mergeFileConfig, fileConfig } from 'librechat-data-provider';
+import {
+  getEndpointFileConfig,
+  mergeFileConfig,
+  fileConfig,
+  FileSources,
+} from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { ServerRequest } from '~/types';
 
@@ -72,7 +77,7 @@ export function filterFilesByEndpointConfig(
   /** Filter by MIME type */
   if (supportedMimeTypes && supportedMimeTypes.length > 0) {
     filteredFiles = filteredFiles.filter((file) => {
-      return isMimeTypeSupported(file.type, supportedMimeTypes);
+      return file.source === FileSources.text || isMimeTypeSupported(file.type, supportedMimeTypes);
     });
   }
 

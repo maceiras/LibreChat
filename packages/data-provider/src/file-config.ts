@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { EToolResources } from './types/assistants';
 import type { EndpointFileConfig, FileConfig } from './types/files';
 import { EModelEndpoint, isAgentsEndpoint, isDocumentSupportedProvider } from './schemas';
 import { normalizeEndpointName } from './utils';
@@ -367,6 +368,17 @@ export const imageTypeMapping: { [key: string]: string } = {
   heif: 'image/heif',
 };
 
+const documentTypeMapping: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  rtf: 'application/rtf',
+};
+
 /** Normalizes non-standard MIME types that browsers may report to their canonical forms */
 export const mimeTypeAliases: Readonly<Record<string, string>> = {
   'application/x-zip-compressed': 'application/zip',
@@ -387,7 +399,12 @@ export function inferMimeType(fileName: string, currentType: string): string {
   }
 
   const extension = fileName.split('.').pop()?.toLowerCase() ?? '';
-  return codeTypeMapping[extension] || imageTypeMapping[extension] || currentType;
+  return (
+    codeTypeMapping[extension] ||
+    imageTypeMapping[extension] ||
+    documentTypeMapping[extension] ||
+    currentType
+  );
 }
 
 export const retrievalMimeTypes = [
@@ -455,6 +472,30 @@ export const fileConfig = {
     return supportedTypes.some((regex) => regex.test(fileType));
   },
 };
+
+/** Selects the MIME allowlist for the actual upload destination. */
+export function getUploadMimeTypes({
+  fileConfig: config = fileConfig,
+  endpointFileConfig,
+  toolResource,
+}: {
+  fileConfig?: FileConfig | null;
+  endpointFileConfig: EndpointFileConfig;
+  toolResource?: string | null;
+}): RegExp[] {
+  if (endpointFileConfig.disabled) {
+    return [];
+  }
+  if (toolResource !== EToolResources.context) {
+    return endpointFileConfig.supportedMimeTypes ?? supportedMimeTypes;
+  }
+  const textConfig = config ?? fileConfig;
+  return [
+    ...(textConfig.text?.supportedMimeTypes ?? []),
+    ...(textConfig.ocr?.supportedMimeTypes ?? []),
+    ...(textConfig.stt?.supportedMimeTypes ?? []),
+  ];
+}
 
 const supportedMimeTypesSchema = z.array(z.string()).optional();
 
@@ -546,6 +587,10 @@ function mergeWithDefault(
   const defaultMimeTypes = isDocumentSupportedProvider(endpoint)
     ? supportedMimeTypes
     : defaultConfig.supportedMimeTypes;
+  const hasCustomMimeTypes =
+    endpointConfig.supportedMimeTypes != null
+      ? endpointConfig.hasCustomMimeTypes
+      : defaultConfig.hasCustomMimeTypes;
 
   return {
     disabled: endpointConfig.disabled ?? defaultConfig.disabled,
@@ -553,6 +598,7 @@ function mergeWithDefault(
     fileSizeLimit: endpointConfig.fileSizeLimit ?? defaultConfig.fileSizeLimit,
     totalSizeLimit: endpointConfig.totalSizeLimit ?? defaultConfig.totalSizeLimit,
     supportedMimeTypes: endpointConfig.supportedMimeTypes ?? defaultMimeTypes,
+    ...(hasCustomMimeTypes ? { hasCustomMimeTypes: true } : {}),
   };
 }
 
@@ -778,6 +824,7 @@ export function mergeFileConfig(dynamic: z.infer<typeof fileConfigSchema> | unde
     }
 
     if (dynamicEndpoint.supportedMimeTypes) {
+      mergedEndpoint.hasCustomMimeTypes = true;
       mergedEndpoint.supportedMimeTypes = convertStringsToRegex(
         dynamicEndpoint.supportedMimeTypes as unknown as string[],
       );

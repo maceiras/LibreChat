@@ -12,7 +12,7 @@ import type { TConversation } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
 import { useGetFileConfig, useGetEndpointsQuery, useGetAgentByIdQuery } from '~/data-provider';
 import { useAgentsMapContext } from '~/Providers';
-import AttachFileMenu from './AttachFileMenu';
+import AttachFiles from './AttachFiles';
 import AttachFile from './AttachFile';
 
 function AttachFileChat({
@@ -109,7 +109,7 @@ function AttachFileChat({
     );
   } else if ((isAgents || endpointSupportsFiles) && !isUploadDisabled) {
     return (
-      <AttachFileMenu
+      <AttachFiles
         endpoint={endpoint}
         disabled={disableInputs}
         endpointType={endpointType}

@@ -193,7 +193,6 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
     const formData = new FormData();
     formData.append('endpoint', endpoint);
     formData.append('endpointType', endpointType ?? '');
-    formData.append('file', extendedFile.file as File, encodeURIComponent(filename));
     formData.append('file_id', extendedFile.file_id);
     if (
       isConversationUpload &&
@@ -236,6 +235,7 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
         formData.append('agent_id', conversation.agent_id);
       }
 
+      formData.append('file', extendedFile.file as File, encodeURIComponent(filename));
       uploadFile.mutate(formData);
       return;
     }
@@ -266,6 +266,7 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
       formData.append('model', convoModel);
     }
 
+    formData.append('file', extendedFile.file as File, encodeURIComponent(filename));
     uploadFile.mutate(formData);
   };
 
@@ -336,6 +337,7 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
         };
 
         const toolResource = useDefaultRouting ? getToolResource(originalFile) : _toolResource;
+        const isTextUpload = toolResource === EToolResources.context;
         if (toolResource != null && toolResource !== '') {
           initialExtendedFile.tool_resource = toolResource;
         }
@@ -347,9 +349,10 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
 
         // Check if HEIC conversion is needed and show toast
         const isHEIC =
-          originalFile.type === 'image/heic' ||
-          originalFile.type === 'image/heif' ||
-          /\.(heic|heif)$/.test(originalFileName);
+          !isTextUpload &&
+          (originalFile.type === 'image/heic' ||
+            originalFile.type === 'image/heif' ||
+            /\.(heic|heif)$/.test(originalFileName));
 
         if (isHEIC) {
           showToast({
@@ -374,7 +377,7 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
         let finalProcessedFile = heicProcessedFile;
 
         // Apply client-side resizing if available and appropriate
-        if (heicProcessedFile.type.startsWith('image/')) {
+        if (!isTextUpload && heicProcessedFile.type.startsWith('image/')) {
           try {
             const resizeResult = await resizeImageIfNeeded(heicProcessedFile);
             finalProcessedFile = resizeResult.file;
@@ -415,7 +418,7 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
 
           replaceFile(updatedExtendedFile);
 
-          const isImage = finalProcessedFile.type.split('/')[0] === 'image';
+          const isImage = !isTextUpload && finalProcessedFile.type.split('/')[0] === 'image';
           if (isImage) {
             loadImage(updatedExtendedFile, newPreview);
             continue;
@@ -424,7 +427,7 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
           await startUpload(updatedExtendedFile);
         } else {
           // File wasn't processed, proceed with original
-          const isImage = originalFile.type.split('/')[0] === 'image';
+          const isImage = !isTextUpload && originalFile.type.split('/')[0] === 'image';
 
           // Update progress to show ready for upload
           const readyExtendedFile = {

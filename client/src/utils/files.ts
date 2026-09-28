@@ -11,7 +11,7 @@ import {
   QueryKeys,
   inferMimeType,
   excelMimeTypes,
-  EToolResources,
+  getUploadMimeTypes,
   fileConfig as defaultFileConfig,
 } from 'librechat-data-provider';
 import type { TFile, EndpointFileConfig, FileConfig } from 'librechat-data-provider';
@@ -237,8 +237,7 @@ export const validateFiles = ({
   fileConfig: FileConfig | null;
   getToolResource?: (file: File) => string | undefined | null;
 }) => {
-  const { fileLimit, fileSizeLimit, totalSizeLimit, supportedMimeTypes, disabled } =
-    endpointFileConfig;
+  const { fileLimit, fileSizeLimit, totalSizeLimit, disabled } = endpointFileConfig;
   /** Block all uploads if the endpoint is explicitly disabled */
   if (disabled === true) {
     setError('com_ui_attach_error_disabled');
@@ -279,15 +278,11 @@ export const validateFiles = ({
       setError(`Unsupported file type: ${originalFile.type}`);
       return false;
     }
-    let mimeTypesToCheck = supportedMimeTypes;
-    if (fileToolResource === EToolResources.context) {
-      const textConfig = fileConfig ?? defaultFileConfig;
-      mimeTypesToCheck = [
-        ...(textConfig.text?.supportedMimeTypes || []),
-        ...(textConfig.ocr?.supportedMimeTypes || []),
-        ...(textConfig.stt?.supportedMimeTypes || []),
-      ];
-    }
+    const mimeTypesToCheck = getUploadMimeTypes({
+      fileConfig,
+      endpointFileConfig,
+      toolResource: fileToolResource,
+    });
 
     if (!checkType(originalFile.type, mimeTypesToCheck)) {
       setError(`Unsupported file type: ${originalFile.type}`);

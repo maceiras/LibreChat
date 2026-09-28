@@ -45,6 +45,8 @@ export type EndpointFileConfig = {
   fileSizeLimit?: number;
   totalSizeLimit?: number;
   supportedMimeTypes?: RegExp[];
+  /** Set by mergeFileConfig when the MIME allowlist comes from configuration. */
+  hasCustomMimeTypes?: boolean;
 };
 
 export type FileConfig = {

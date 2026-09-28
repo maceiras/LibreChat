@@ -7,6 +7,36 @@ Current base: LibreChat `v0.8.7` (`9e74cc0`). Entries are listed newest first.
 
 - **Documentation**: add this changelog and guidelines for keeping it up to date.
 
+## 2026-09-28 — Automatic document uploads and MIME routing
+
+- **Provider MIME routing**: honor explicit provider MIME allowlists for all
+  declared formats, including Word, Excel, PowerPoint, and text documents.
+  The legacy image/PDF fallback no longer overrides an explicit list. Existing
+  Bedrock transport constraints and Azure Responses requirements still apply.
+- Validate text uploads against their text/OCR/transcription allowlists on both
+  client and server. Send routing metadata before the multipart file so the
+  server can choose the correct validator. Keep successfully extracted text
+  attached to messages even when its MIME type is outside the provider list.
+- Route images selected for text extraction through the file-processing endpoint
+  without image resizing. Infer common document MIME types when browsers omit them.
+- **Automatic uploads**: remove the upload-mode menus from the paperclip and
+  drag-and-drop flows. The paperclip opens the file picker directly; dropped
+  files are processed immediately. Each file uses the provider when supported,
+  otherwise text processing, with an error when neither path is available or
+  processing fails. Routing still uses the existing pre-upload compatibility
+  checks and MIME configuration.
+- Keep SharePoint accessible through a separate button when configured. Agent
+  configuration uploads and Assistants keep their existing routing.
+- Remove the unused upload menu, drag-and-drop dialog, and dialog context;
+  replace their tests with UI coverage of automatic uploads and errors.
+
+**Validation:** 390 targeted tests passed across shared configuration, frontend,
+upload middleware, file processing, and attachment filtering. Coverage includes
+real multipart parsing, provider/text routing, text extraction errors, keyboard
+activation, and SharePoint access. TypeScript, lint, and the data-provider, API,
+and production frontend builds passed. No Docker deployment or live provider
+tests were run.
+
 ## 2026-09-28 — Unified attachment uploads
 
 Change: `61efa3b`; merged into `local_main`: `29ee450`.

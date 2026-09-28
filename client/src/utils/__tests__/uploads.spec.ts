@@ -24,6 +24,26 @@ const mimeTypes: Record<string, string> = {
 const sampleFile = (name: string) => ({ name, type: mimeTypes[name] ?? '' });
 
 describe('default attachment routing', () => {
+  it.each(['document.docx', 'workbook.xlsx', 'slides.pptx', 'notes.txt'])(
+    'sends explicitly supported %s to the provider instead of text',
+    (name) => {
+      const configured = mergeFileConfig({
+        endpoints: { openAI: { supportedMimeTypes: [mimeTypes[name]] } },
+      });
+      const endpointFileConfig = getEndpointFileConfig({
+        endpoint: 'openAI',
+        fileConfig: configured,
+      });
+      expect(
+        getDefaultUploadToolResource(sampleFile(name), {
+          ...defaultOptions,
+          fileConfig: configured,
+          endpointFileConfig,
+        }),
+      ).toBeUndefined();
+    },
+  );
+
   it.each([
     ['image.png', 'image/png', undefined],
     ['document.pdf', 'application/pdf', undefined],
