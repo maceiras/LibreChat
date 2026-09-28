@@ -700,6 +700,9 @@ endpoints:
 #       preset:
 #         endpoint: "openAI"
 #         model: "gpt-4o"
+#         useResponsesApi: true
+#         web_search: true
+#         code_execution: true  # Optional OpenAI-hosted Code Interpreter; false/omitted disables it
 #       # Skills can be enabled per model spec. Use true for the user's active
 #       # accessible skill catalog, false to force skills off, or a name list as
 #       # a strict allowlist for catalog, manual, and always-apply resolution.

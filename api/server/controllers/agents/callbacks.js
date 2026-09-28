@@ -19,6 +19,7 @@ const {
   GenerationJobManager,
   writeAttachmentEvent,
   createToolExecuteHandler,
+  createOpenAIFileHandler,
   HOST_FILE_AUTHORING_ARTIFACT_KEY,
   isCodeSessionToolName,
 } = require('@librechat/api');
@@ -292,6 +293,8 @@ function feedSubagentAggregator(aggregator, event) {
  */
 function getDefaultHandlers({
   res,
+  openAIFileOptions = null,
+  artifactPromises = null,
   aggregateContent,
   toolEndCallback,
   collectedUsage,
@@ -566,6 +569,19 @@ function getDefaultHandlers({
         }
       },
     };
+  }
+
+  if (openAIFileOptions && artifactPromises) {
+    handlers[GraphEvents.CHAT_MODEL_END] = createOpenAIFileHandler({
+      ...openAIFileOptions,
+      handler: handlers[GraphEvents.CHAT_MODEL_END],
+      onFile: (file) => {
+        artifactPromises.push(Promise.resolve(file));
+        if (streamId || (res.headersSent && !res.writableEnded)) {
+          writeAttachment(res, streamId, file);
+        }
+      },
+    });
   }
 
   return handlers;

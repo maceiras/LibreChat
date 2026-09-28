@@ -51,6 +51,7 @@ export interface IPreset extends Document {
   reasoning_summary?: string;
   verbosity?: string;
   useResponsesApi?: boolean;
+  code_execution?: boolean;
   web_search?: boolean;
   url_context?: boolean;
   disableStreaming?: boolean;

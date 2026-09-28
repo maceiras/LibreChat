@@ -29,6 +29,7 @@ export enum FileContext {
   execute_code = 'execute_code',
   image_generation = 'image_generation',
   assistants_output = 'assistants_output',
+  code_interpreter = 'code_interpreter',
   message_attachment = 'message_attachment',
   skill_file = 'skill_file',
   filename = 'filename',

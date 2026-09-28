@@ -13,6 +13,7 @@ import { MessageContext, SearchContext } from '~/Providers';
 import PendingSkillCall from './Parts/PendingSkillCall';
 import { EditTextPart, EmptyText } from './Parts';
 import MemoryArtifacts from './MemoryArtifacts';
+import ContainerFiles from './ContainerFiles';
 import ToolCallGroup from './ToolCallGroup';
 import Container from './Container';
 import Part from './Part';
@@ -375,6 +376,7 @@ const ContentParts = memo(function ContentParts({
     return (
       <>
         {renderPendingSkills()}
+        <ContainerFiles attachments={attachments} />
         <ParallelContentRenderer
           content={content}
           messageId={messageId}
@@ -393,6 +395,7 @@ const ContentParts = memo(function ContentParts({
   return (
     <SearchContext.Provider value={{ searchResults }}>
       <MemoryArtifacts attachments={attachments} />
+      <ContainerFiles attachments={attachments} />
       {renderPendingSkills()}
       {showEmptyCursor && (
         <Container>

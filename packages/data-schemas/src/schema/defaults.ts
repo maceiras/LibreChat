@@ -162,6 +162,9 @@ export const conversationPreset: {
   useResponsesApi: {
     type: BooleanConstructor;
   };
+  code_execution: {
+    type: BooleanConstructor;
+  };
   /** OpenAI Responses API / Anthropic API / Google API */
   web_search: {
     type: BooleanConstructor;
@@ -326,6 +329,9 @@ export const conversationPreset: {
     type: Number,
   },
   useResponsesApi: {
+    type: Boolean,
+  },
+  code_execution: {
     type: Boolean,
   },
   /** OpenAI Responses API / Anthropic API / Google API */

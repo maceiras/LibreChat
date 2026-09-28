@@ -948,6 +948,8 @@ export const tConversationSchema = z.object({
   verbosity: eVerbositySchema.optional().nullable(),
   /* OpenAI: use Responses API */
   useResponsesApi: z.boolean().optional(),
+  /** OpenAI Responses: hosted Code Interpreter, independent of execute_code. */
+  code_execution: z.boolean().optional(),
   /* Anthropic: Effort control */
   effort: eAnthropicEffortSchema.optional().nullable(),
   /* Anthropic: Thinking visibility (Opus 4.7+ opt-in) */
@@ -1064,6 +1066,7 @@ export const tQueryParamsSchema = tConversationSchema
     verbosity: true,
     /** @endpoints openAI, custom, azureOpenAI */
     useResponsesApi: true,
+    code_execution: true,
     /** @endpoints openAI, anthropic, google */
     web_search: true,
     /** @endpoints google */
@@ -1377,6 +1380,7 @@ export const openAIBaseSchema = tConversationSchema.pick({
   reasoning_summary: true,
   verbosity: true,
   useResponsesApi: true,
+  code_execution: true,
   web_search: true,
   disableStreaming: true,
   fileTokenLimit: true,
