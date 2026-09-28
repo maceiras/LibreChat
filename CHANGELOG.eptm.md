@@ -42,6 +42,9 @@ between conversation turns by this integration.
 
 ## 2026-09-28 — Native Responses progress
 
+- Hide the redundant waiting dot when the same message displays the Responses
+  progress panel. Keep the dot as a fallback for messages without progress details.
+  This refinement passed 24 existing rendering tests, ESLint, and the local Docker build.
 - Show real OpenAI Responses stages (web search, code preparation, Python execution,
   response writing, and local file retrieval) with elapsed time. Keep completed
   replies compact with an expandable history and frozen duration.

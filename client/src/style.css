@@ -2026,6 +2026,10 @@ html {
     transform: scale3d(1.25, 1.25, 1);
   }
 }
+.message-render:has([data-response-progress]) .result-thinking {
+  display: none;
+}
+
 .submitting .result-thinking:empty:last-child:after {
   -webkit-font-smoothing: subpixel-antialiased;
   -webkit-animation: pulseSize 1.25s ease-in-out infinite;

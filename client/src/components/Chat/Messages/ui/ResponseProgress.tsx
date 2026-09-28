@@ -62,7 +62,10 @@ export default function ResponseProgress({
   const Icon = running ? LoaderCircle : SettledIcon;
 
   return (
-    <details className="group/progress my-2 rounded-lg border border-border-light px-3 py-2 text-sm text-text-secondary">
+    <details
+      data-response-progress
+      className="group/progress my-2 rounded-lg border border-border-light px-3 py-2 text-sm text-text-secondary"
+    >
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <Icon
           aria-hidden="true"
