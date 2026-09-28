@@ -69,6 +69,7 @@ jest.mock('~/cache', () => ({
 }));
 
 const { initializeClient } = require('./initialize');
+const { getDefaultHandlers } = require('~/server/controllers/agents/callbacks');
 const { getSkillToolDeps } = require('./skillDeps');
 const { logger } = require('@librechat/data-schemas');
 const { User, AclEntry } = require('~/db/models');
@@ -138,6 +139,26 @@ describe('initializeClient — processAgent ACL gate', () => {
     tool_resources: {},
     resendFiles: true,
     maxContextTokens: 4096,
+  });
+
+  it('uses the image storage override for native Code Interpreter output', async () => {
+    const req = makeReq();
+    req.config.fileStrategy = 's3';
+    req.config.fileStrategies = { image: 'local' };
+    mockInitializeAgent.mockResolvedValue(makePrimaryConfig([]));
+
+    await initializeClient({
+      req,
+      res: {},
+      signal: new AbortController().signal,
+      endpointOption: makeEndpointOption(),
+    });
+
+    expect(getDefaultHandlers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        openAIFileOptions: expect.objectContaining({ imageSource: 'local' }),
+      }),
+    );
   });
 
   it('should skip handoff agent and filter its edge when user lacks VIEW access', async () => {

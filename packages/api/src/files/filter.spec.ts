@@ -808,15 +808,17 @@ describe('filterFilesByEndpointConfig', () => {
 
   describe('MIME type filtering', () => {
     it('keeps extracted text outside the provider MIME list while rejecting the raw file', () => {
-      const req = {
-        config: {
-          fileConfig: {
-            endpoints: {
-              openAI: { supportedMimeTypes: ['^application/pdf$'], fileSizeLimit: 1 },
-            },
+      const req = {} as ServerRequest;
+      req.config = {
+        config: {},
+        fileStrategy: FileSources.local,
+        imageOutputType: 'png',
+        fileConfig: {
+          endpoints: {
+            openAI: { supportedMimeTypes: ['^application/pdf$'], fileSizeLimit: 1 },
           },
         },
-      } as ServerRequest;
+      };
       const raw = { ...createMockFile('notes.txt'), type: 'text/plain', source: FileSources.local };
       const extracted = { ...raw, source: FileSources.text, text: 'Extracted content' };
       const oversized = { ...extracted, bytes: 2 * 1024 * 1024 };

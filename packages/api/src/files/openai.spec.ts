@@ -1,4 +1,5 @@
 import os from 'node:os';
+import sharp from 'sharp';
 import path from 'node:path';
 import { model } from 'mongoose';
 import { fileSchema } from '@librechat/data-schemas';
@@ -38,6 +39,7 @@ describe('Responses container files', () => {
     status = 200,
     provider = Providers.OPENAI,
     useResponsesApi = true,
+    imageSource = FileSources.local,
   } = {}) {
     const fetch = jest.fn(
       async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -84,12 +86,14 @@ describe('Responses container files', () => {
     const onFile = jest.fn();
     const previousHandler = { handle: jest.fn() };
     const expiredAt = new Date('2026-10-01');
+    const getStrategyFunctions = jest.fn((_source: string) => ({ saveBuffer }));
     const handler = createOpenAIFileHandler({
       req,
+      imageSource,
       handler: previousHandler,
       createFile,
       onFile,
-      getStrategyFunctions: () => ({ saveBuffer }),
+      getStrategyFunctions,
       getRetentionExpiry: async () => ({ expiredAt }),
     });
     const output = new AIMessageChunk({
@@ -105,6 +109,7 @@ describe('Responses container files', () => {
       createFile,
       onFile,
       saveBuffer,
+      getStrategyFunctions,
       previousHandler,
       expiredAt,
     };
@@ -140,6 +145,100 @@ describe('Responses container files', () => {
     expect(String(file.user)).toBe('507f1f77bcf86cd799439011');
     expect(file.file_id).not.toBe(citation.file_id);
     expect(await readFile(file.filepath, 'utf8')).toBe('a,b\n1,2\n');
+  });
+
+  it.each(['png', 'jpeg', 'gif', 'webp'] as const)(
+    'preserves a real %s image and its dimensions for inline rendering after reload',
+    async (format) => {
+      const buffer = await sharp({
+        create: { width: 32, height: 16, channels: 3, background: '#2d6cdf' },
+      })
+        .toFormat(format)
+        .toBuffer();
+      const test = setup();
+      test.fetch.mockImplementation(async () => new Response(new Uint8Array(buffer)));
+      test.output.content = [
+        {
+          type: 'text',
+          text: 'Here is the chart.',
+          annotations: [{ ...citation, filename: `/mnt/data/chart.${format}` }],
+        },
+      ];
+
+      await test.invoke();
+
+      const file = test.onFile.mock.calls[0][0] as IMongoFile;
+      expect(file).toMatchObject({
+        type: `image/${format}`,
+        width: 32,
+        height: 16,
+        bytes: buffer.length,
+        context: FileContext.code_interpreter,
+        source: FileSources.local,
+        expiredAt: test.expiredAt,
+      });
+      expect(test.saveBuffer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          basePath: 'images',
+          userId: '507f1f77bcf86cd799439011',
+          tenantId: 'school',
+          fileName: `${file.file_id}.${format}`,
+        }),
+      );
+      expect(await readFile(file.filepath)).toEqual(buffer);
+      const restored = new File(JSON.parse(JSON.stringify(file)));
+      await expect(restored.validate()).resolves.toBeUndefined();
+      expect(restored.toObject()).toMatchObject({ width: 32, height: 16, type: `image/${format}` });
+    },
+  );
+
+  it('uses the configured image storage while ordinary files keep their download storage', async () => {
+    const buffer = await sharp({
+      create: { width: 2, height: 1, channels: 3, background: '#2d6cdf' },
+    })
+      .png()
+      .toBuffer();
+    const test = setup({ imageSource: FileSources.s3 });
+    test.fetch.mockImplementationOnce(async () => new Response(new Uint8Array(buffer)));
+    test.output.content = [
+      {
+        type: 'text',
+        text: '',
+        annotations: [{ ...citation, file_id: 'cfile_image', filename: 'chart.png' }, citation],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.getStrategyFunctions.mock.calls).toEqual([[FileSources.s3], [FileSources.local]]);
+    expect(test.onFile.mock.calls.map(([file]: [IMongoFile]) => file.source)).toEqual([
+      FileSources.s3,
+      FileSources.local,
+    ]);
+    expect(test.saveBuffer.mock.calls.map(([params]) => params.basePath)).toEqual([
+      'images',
+      'uploads',
+    ]);
+  });
+
+  it.each([
+    'invalid image bytes',
+    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16"/></svg>',
+  ])('keeps an invalid or unsupported PNG payload downloadable: %s', async (payload) => {
+    const test = setup();
+    test.fetch.mockImplementation(async () => new Response(payload));
+    test.output.content = [
+      { type: 'text', text: '', annotations: [{ ...citation, filename: 'chart.png' }] },
+    ];
+
+    await expect(test.invoke()).resolves.toBeUndefined();
+
+    const file = test.onFile.mock.calls[0][0] as IMongoFile;
+    expect(file.width).toBeUndefined();
+    expect(file.height).toBeUndefined();
+    expect(file.type).toBe('application/octet-stream');
+    expect(test.saveBuffer).toHaveBeenCalledWith(expect.objectContaining({ basePath: 'uploads' }));
+    expect(await readFile(file.filepath, 'utf8')).toBe(payload);
   });
 
   it('accepts the normalized citations returned by the installed LangChain Responses adapter', async () => {

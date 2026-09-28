@@ -47,6 +47,7 @@ const { logViolation } = require('~/cache');
 const db = require('~/models');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
 const { getRetentionExpiry } = require('~/server/services/Files/retention');
+const { getFileStrategy } = require('~/server/utils/getFileStrategy');
 
 /**
  * Creates a tool loader function for the agent.
@@ -266,7 +267,13 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
   const eventHandlers = getDefaultHandlers({
     res,
     artifactPromises,
-    openAIFileOptions: { req, getStrategyFunctions, getRetentionExpiry, createFile: db.createFile },
+    openAIFileOptions: {
+      req,
+      getStrategyFunctions,
+      getRetentionExpiry,
+      createFile: db.createFile,
+      imageSource: getFileStrategy(req.config, { isImage: true }),
+    },
     toolExecuteOptions,
     summarizationOptions,
     aggregateContent,
