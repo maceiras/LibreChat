@@ -8,15 +8,7 @@ import {
   FileImageIcon,
   TerminalSquareIcon,
 } from 'lucide-react';
-import {
-  Providers,
-  inferMimeType,
-  EToolResources,
-  EModelEndpoint,
-  isBedrockDocumentType,
-  defaultAgentCapabilities,
-  isDocumentSupportedProvider,
-} from 'librechat-data-provider';
+import { EToolResources, defaultAgentCapabilities } from 'librechat-data-provider';
 import {
   useAgentToolPermissions,
   useAgentCapabilities,
@@ -24,6 +16,8 @@ import {
   useLocalize,
 } from '~/hooks';
 import { ephemeralAgentByConvoId } from '~/store';
+import useUploadRouting from '~/hooks/Files/useUploadRouting';
+import { supportsDocumentUpload } from '~/utils/uploads';
 import { useDragDropContext } from '~/Providers';
 
 interface DragDropModalProps {
@@ -55,65 +49,40 @@ const DragDropModal = ({ onOptionSelect, setShowModal, files, isVisible }: DragD
     ephemeralAgent,
   );
 
+  const { getToolResource } = useUploadRouting({
+    endpoint,
+    endpointType,
+    agentId,
+    useResponsesApi,
+  });
+
   const options = useMemo(() => {
     const _options: FileOption[] = [];
-    let currentProvider = provider || endpoint;
-
-    // This will be removed in a future PR to formally normalize Providers comparisons to be case insensitive
-    if (currentProvider?.toLowerCase() === Providers.OPENROUTER) {
-      currentProvider = Providers.OPENROUTER;
-    }
-
-    /** Helper to get inferred MIME type for a file */
-    const getFileType = (file: File) => inferMimeType(file.name, file.type);
-
-    const isAzureWithResponsesApi =
-      (currentProvider === EModelEndpoint.azureOpenAI ||
-        endpointType === EModelEndpoint.azureOpenAI) &&
-      useResponsesApi === true;
-
-    // Check if provider supports document upload
-    if (
-      isDocumentSupportedProvider(endpointType) ||
-      isDocumentSupportedProvider(currentProvider) ||
-      isAzureWithResponsesApi
-    ) {
-      const supportsImageDocVideoAudio =
-        currentProvider === EModelEndpoint.google || currentProvider === Providers.OPENROUTER;
-      const isBedrock =
-        currentProvider === Providers.BEDROCK || endpointType === EModelEndpoint.bedrock;
-
-      const isValidProviderFile = (file: File): boolean => {
-        const type = getFileType(file);
-        if (supportsImageDocVideoAudio) {
-          return (
-            type?.startsWith('image/') ||
-            type?.startsWith('video/') ||
-            type?.startsWith('audio/') ||
-            type === 'application/pdf'
-          );
-        }
-        if (isBedrock) {
-          return type?.startsWith('image/') || isBedrockDocumentType(type);
-        }
-        return type?.startsWith('image/') || type === 'application/pdf';
-      };
-
-      const validFileTypes = files.every(isValidProviderFile);
-
-      _options.push({
-        label: localize('com_ui_upload_provider'),
-        value: undefined,
-        icon: <FileImageIcon className="icon-md" />,
-        condition: validFileTypes,
+    const routes = files.map(getToolResource);
+    const hasProviderFiles = routes.some((route) => route === undefined);
+    const canUploadFiles = files.length > 0 && routes.every((route) => route !== null);
+    if (hasProviderFiles) {
+      const supportsDocuments = supportsDocumentUpload({
+        provider: provider || endpoint,
+        endpointType,
+        useResponsesApi,
       });
-    } else {
-      // Only show image upload option if all files are images and provider doesn't support documents
       _options.push({
-        label: localize('com_ui_upload_image_input'),
+        label: localize(supportsDocuments ? 'com_ui_upload_provider' : 'com_ui_upload_image_input'),
         value: undefined,
-        icon: <ImageUpIcon className="icon-md" />,
-        condition: files.every((file) => getFileType(file)?.startsWith('image/')),
+        icon: supportsDocuments ? (
+          <FileImageIcon className="icon-md" />
+        ) : (
+          <ImageUpIcon className="icon-md" />
+        ),
+        condition: canUploadFiles,
+      });
+    }
+    if (capabilities.contextEnabled) {
+      _options.push({
+        label: localize('com_ui_upload_ocr_text'),
+        value: EToolResources.context,
+        icon: <FileType2Icon className="icon-md" />,
       });
     }
     if (capabilities.fileSearchEnabled && fileSearchAllowedByAgent) {
@@ -130,14 +99,6 @@ const DragDropModal = ({ onOptionSelect, setShowModal, files, isVisible }: DragD
         icon: <TerminalSquareIcon className="icon-md" />,
       });
     }
-    if (capabilities.contextEnabled) {
-      _options.push({
-        label: localize('com_ui_upload_ocr_text'),
-        value: EToolResources.context,
-        icon: <FileType2Icon className="icon-md" />,
-      });
-    }
-
     return _options;
   }, [
     files,
@@ -149,6 +110,7 @@ const DragDropModal = ({ onOptionSelect, setShowModal, files, isVisible }: DragD
     useResponsesApi,
     codeAllowedByAgent,
     fileSearchAllowedByAgent,
+    getToolResource,
   ]);
 
   if (!isVisible) {

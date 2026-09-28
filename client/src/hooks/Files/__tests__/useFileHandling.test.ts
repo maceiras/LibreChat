@@ -1,5 +1,13 @@
-import { renderHook, act } from '@testing-library/react';
-import { Constants, EModelEndpoint, getEndpointFileConfig } from 'librechat-data-provider';
+import { createElement } from 'react';
+import { render, fireEvent, renderHook, act, waitFor } from '@testing-library/react';
+import {
+  Constants,
+  EModelEndpoint,
+  EToolResources,
+  getEndpointFileConfig,
+} from 'librechat-data-provider';
+import type { Agent, TFileConfig, TEndpointsConfig, TConversation } from 'librechat-data-provider';
+import type { ChangeEvent } from 'react';
 
 beforeAll(() => {
   global.URL.createObjectURL = jest.fn(() => 'blob:mock-url');
@@ -26,8 +34,20 @@ const mockProcessFileForUpload = jest.fn(
 );
 const mockLocalize = jest.fn((key: string) => key);
 
-let mockConversation: Record<string, string | null | undefined> = {};
+let mockConversation: Partial<Omit<TConversation, 'endpoint' | 'endpointType'>> & {
+  endpoint?: string | null;
+  endpointType?: string | null;
+} = {};
 let mockIsTemporary = false;
+let mockFileConfig: TFileConfig | null = null;
+let mockEndpointsConfig: TEndpointsConfig | undefined;
+let mockAgent:
+  | { provider: Agent['provider']; model_parameters?: Partial<Agent['model_parameters']> }
+  | undefined;
+
+jest.mock('~/Providers/AgentsMapContext', () => ({
+  useAgentsMapContext: () => ({}),
+}));
 
 jest.mock('~/Providers/ChatContext', () => ({
   useChatContext: jest.fn(() => ({
@@ -64,7 +84,11 @@ jest.mock('@tanstack/react-query', () => ({
 }));
 
 jest.mock('~/data-provider', () => ({
-  useGetFileConfig: jest.fn(() => ({ data: null })),
+  useGetFileConfig: jest.fn(({ select }) => ({
+    data: mockFileConfig ? select(mockFileConfig) : null,
+  })),
+  useGetEndpointsQuery: jest.fn(() => ({ data: mockEndpointsConfig })),
+  useGetAgentByIdQuery: jest.fn(() => ({ data: mockAgent })),
   useUploadFileMutation: jest.fn((_opts: Record<string, unknown>) => ({
     mutate: mockMutate,
   })),
@@ -115,15 +139,182 @@ jest.mock('~/utils', () => ({
 
 const mockValidateFiles = jest.requireMock('~/utils').validateFiles;
 
+function pickFiles(onChange: (event: ChangeEvent<HTMLInputElement>) => void, files: File[]) {
+  const view = render(createElement('input', { type: 'file', 'aria-label': 'Files', onChange }));
+  fireEvent.change(view.getByLabelText('Files'), { target: { files } });
+}
+
 describe('useFileHandling', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockProcessFileForUpload.mockImplementation(async (file: File) => file);
     mockConversation = {};
     mockIsTemporary = false;
+    mockFileConfig = null;
+    mockEndpointsConfig = undefined;
+    mockAgent = undefined;
   });
 
   const loadHook = async () => (await import('../useFileHandling')).default;
+
+  describe('paperclip and drop routing', () => {
+    beforeEach(() => {
+      mockConversation = { endpoint: 'openAI', conversationId: 'convo-1' };
+      mockFileConfig = {};
+      mockValidateFiles.mockImplementation(jest.requireActual('~/utils/files').validateFiles);
+    });
+
+    afterEach(() => {
+      mockValidateFiles.mockImplementation(() => true);
+    });
+
+    it.each(['picker', 'drop'] as const)(
+      '%s prioritizes provider per file and falls back to text in a mixed batch',
+      async (method) => {
+        const useFileHandling = await loadHook();
+        const { result } = renderHook(() => useFileHandling());
+        const fileList = [
+          new File(['pdf'], 'document.pdf', { type: 'application/pdf' }),
+          new File(['docx'], 'document.docx', {
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          }),
+          new File(['xlsx'], 'workbook.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+          new File(['notes'], 'notes.txt', { type: 'text/plain' }),
+        ];
+        if (method === 'picker') {
+          pickFiles(result.current.handleFileChange, fileList);
+        } else {
+          await act(async () => {
+            await result.current.handleFiles(fileList);
+          });
+        }
+        await waitFor(() => expect(mockMutate).toHaveBeenCalledTimes(4));
+        const routes = mockMutate.mock.calls.map(([body]: [FormData]) => body.get('tool_resource'));
+        expect(routes).toEqual([
+          null,
+          EToolResources.context,
+          EToolResources.context,
+          EToolResources.context,
+        ]);
+      },
+    );
+
+    it.each(['picker', 'drop'] as const)(
+      '%s honors the permissive OpenAI configuration',
+      async (method) => {
+        mockFileConfig = { endpoints: { openAI: { supportedMimeTypes: ['.*'] } } };
+        const useFileHandling = await loadHook();
+        const { result } = renderHook(() => useFileHandling());
+        const fileList = [
+          new File(['docx'], 'document.docx', {
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          }),
+          new File(['slides'], 'slides.pptx', {
+            type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          }),
+        ];
+        if (method === 'picker') {
+          pickFiles(result.current.handleFileChange, fileList);
+        } else {
+          await act(async () => {
+            await result.current.handleFiles(fileList);
+          });
+        }
+        await waitFor(() => expect(mockMutate).toHaveBeenCalledTimes(2));
+        for (const [body] of mockMutate.mock.calls) {
+          expect(body.get('tool_resource')).toBeNull();
+        }
+      },
+    );
+
+    it.each([EToolResources.context, EToolResources.file_search, EToolResources.execute_code])(
+      'preserves explicit %s selection',
+      async (toolResource) => {
+        const useFileHandling = await loadHook();
+        const { result } = renderHook(() => useFileHandling());
+        await act(async () => {
+          await result.current.handleFiles(
+            [new File(['pdf'], 'document.pdf', { type: 'application/pdf' })],
+            toolResource,
+          );
+        });
+        expect(mockMutate).toHaveBeenCalledTimes(1);
+        expect(mockMutate.mock.calls[0][0].get('tool_resource')).toBe(toolResource);
+      },
+    );
+
+    it('resolves an agent provider and its Responses setting', async () => {
+      mockConversation = {
+        endpoint: 'agents',
+        endpointType: EModelEndpoint.agents,
+        agent_id: 'agent-1',
+      };
+      mockAgent = { provider: 'azureOpenAI', model_parameters: { useResponsesApi: true } };
+      const useFileHandling = await loadHook();
+      const { result } = renderHook(() => useFileHandling());
+      await act(async () => {
+        await result.current.handleFiles([
+          new File(['pdf'], 'document.pdf', { type: 'application/pdf' }),
+        ]);
+      });
+      expect(mockMutate).toHaveBeenCalledTimes(1);
+      expect(mockMutate.mock.calls[0][0].get('tool_resource')).toBeNull();
+    });
+
+    it('does not fall back to text when the context capability is disabled', async () => {
+      mockEndpointsConfig = { agents: { capabilities: [], order: 0 } };
+      const useFileHandling = await loadHook();
+      const { result } = renderHook(() => useFileHandling());
+      await act(async () => {
+        await result.current.handleFiles([
+          new File(['docx'], 'document.docx', {
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          }),
+        ]);
+      });
+      expect(mockMutate).not.toHaveBeenCalled();
+      expect(mockSetFilesLoading).toHaveBeenCalledWith(false);
+    });
+
+    it.each([
+      { disabled: true },
+      { fileLimit: 1 },
+      { totalSizeLimit: 0.000001 },
+      { fileSizeLimit: 0.000001 },
+    ])('enforces endpoint limits across a mixed batch: %j', async (limits) => {
+      mockFileConfig = { endpoints: { openAI: limits } };
+      const useFileHandling = await loadHook();
+      const { result } = renderHook(() => useFileHandling());
+      await act(async () => {
+        await result.current.handleFiles([
+          new File(['pdf'], 'document.pdf', { type: 'application/pdf' }),
+          new File(['docx'], 'document.docx', {
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          }),
+        ]);
+      });
+      expect(mockMutate).not.toHaveBeenCalled();
+      expect(mockSetFilesLoading).toHaveBeenCalledWith(false);
+    });
+
+    it('rejects duplicate files before uploading a mixed batch', async () => {
+      const useFileHandling = await loadHook();
+      const { result } = renderHook(() => useFileHandling());
+      const docx = new File(['docx'], 'document.docx', {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      await act(async () => {
+        await result.current.handleFiles([
+          new File(['pdf'], 'document.pdf', { type: 'application/pdf' }),
+          docx,
+          docx,
+        ]);
+      });
+      expect(mockMutate).not.toHaveBeenCalled();
+    });
+  });
 
   describe('endpointOverride', () => {
     it('uploads non-HEIC images without running HEIC conversion', async () => {

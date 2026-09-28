@@ -8,22 +8,21 @@ import {
   QueryKeys,
   Constants,
   EToolResources,
-  mergeFileConfig,
   isAssistantsEndpoint,
-  getEndpointFileConfig,
   defaultAssistantsVersion,
 } from 'librechat-data-provider';
 import type { EModelEndpoint, TEndpointsConfig, TError } from 'librechat-data-provider';
 import type { TConversation } from 'librechat-data-provider';
 import type { ExtendedFile, FileSetter } from '~/common';
 import { logger, validateFiles, cachePreview, getCachedPreview, removePreviewEntry } from '~/utils';
-import { useGetFileConfig, useUploadFileMutation } from '~/data-provider';
+import { useUploadFileMutation } from '~/data-provider';
 import useLocalize, { TranslationKeys } from '~/hooks/useLocalize';
 import { useDelayedUploadToast } from './useDelayedUploadToast';
 import { useChatContext } from '~/Providers/ChatContext';
 import store, { ephemeralAgentByConvoId } from '~/store';
 import useClientResize from './useClientResize';
 import useUpdateFiles from './useUpdateFiles';
+import useUploadRouting from './useUploadRouting';
 
 type UseFileHandling = {
   fileSetter?: FileSetter;
@@ -77,8 +76,11 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
     [endpointOverride, conversation?.endpoint],
   );
 
-  const { data: fileConfig = null } = useGetFileConfig({
-    select: (data) => mergeFileConfig(data),
+  const { getToolResource, endpointFileConfig, fileConfig } = useUploadRouting({
+    endpoint,
+    endpointType,
+    agentId: conversation?.agent_id,
+    useResponsesApi: conversation?.useResponsesApi,
   });
 
   const displayToast = useCallback(() => {
@@ -286,15 +288,15 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
   const handleFiles = async (_files: FileList | File[], _toolResource?: string) => {
     abortControllerRef.current = new AbortController();
     const fileList = Array.from(_files);
+    const useDefaultRouting =
+      !_toolResource &&
+      isConversationUpload &&
+      !endpointOverride &&
+      !endpointTypeOverride &&
+      !isAssistantsEndpoint(endpointType ?? endpoint);
     /* Validate files */
     let filesAreValid: boolean;
     try {
-      const endpointFileConfig = getEndpointFileConfig({
-        endpoint,
-        fileConfig,
-        endpointType,
-      });
-
       filesAreValid = validateFiles({
         files,
         fileList,
@@ -302,10 +304,12 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
         fileConfig,
         endpointFileConfig,
         toolResource: _toolResource,
+        getToolResource: useDefaultRouting ? getToolResource : undefined,
       });
     } catch (error) {
       console.error('file validation error', error);
       setError('com_error_files_validation');
+      setFilesLoading(false);
       return;
     }
     if (!filesAreValid) {
@@ -331,8 +335,9 @@ const useFileHandlingCore = (params: UseFileHandling | undefined, fileState: Fil
           size: originalFile.size,
         };
 
-        if (_toolResource != null && _toolResource !== '') {
-          initialExtendedFile.tool_resource = _toolResource;
+        const toolResource = useDefaultRouting ? getToolResource(originalFile) : _toolResource;
+        if (toolResource != null && toolResource !== '') {
+          initialExtendedFile.tool_resource = toolResource;
         }
 
         // Add file immediately to show in UI
