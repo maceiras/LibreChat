@@ -210,12 +210,14 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
       logger.debug(`[ON_TOOL_EXECUTE] ctx found: ${!!ctx.userMCPAuthMap}, agent: ${ctx.agent?.id}`);
       logger.debug(`[ON_TOOL_EXECUTE] toolRegistry size: ${ctx.toolRegistry?.size ?? 'undefined'}`);
 
+      const nativeTools = openAIResources.loadTools(toolNames, agentId);
+      const nativeToolNames = new Set(nativeTools.map((tool) => tool.name));
       const result = await loadToolsForExecution({
         req,
         res,
         signal,
         streamId,
-        toolNames,
+        toolNames: toolNames.filter((name) => !nativeToolNames.has(name)),
         agent: ctx.agent,
         toolRegistry: ctx.toolRegistry,
         mcpAvailableTools: ctx.mcpAvailableTools,
@@ -224,6 +226,10 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
         tool_resources: ctx.tool_resources,
         actionsEnabled: ctx.actionsEnabled,
       });
+
+      if (nativeTools.length > 0) {
+        result.loadedTools = [...(result.loadedTools ?? []), ...nativeTools];
+      }
 
       logger.debug(`[ON_TOOL_EXECUTE] loaded ${result.loadedTools?.length ?? 0} tools`);
       /** Per-agent narrowed flag (admin capability AND agent.tools

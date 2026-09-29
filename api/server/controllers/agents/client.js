@@ -1225,7 +1225,7 @@ class AgentClient extends BaseClient {
 
       const nativeResourceInstructions = await this.options.openAIResources?.prepare({
         container: this.openAIContainer,
-        agent: responseAgent,
+        agent: this.openAIContainer.agent,
         conversationId: this.conversationId,
         history: this.currentMessages ?? [],
         payload,
@@ -1258,7 +1258,7 @@ class AgentClient extends BaseClient {
           });
           const instructions = await this.options.openAIResources?.prepare({
             container,
-            agent,
+            agent: container.agent,
             conversationId: this.conversationId,
             history: [],
             payload: [],

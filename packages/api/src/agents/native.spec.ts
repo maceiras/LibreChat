@@ -3,6 +3,7 @@ import { Types } from 'mongoose';
 import { CustomOpenAIClient } from '@librechat/agents';
 import type { ServerRequest } from '~/types';
 import { createOpenAIResources } from './native';
+import { IMPORT_COMMONS_IMAGE_TOOL_NAME, SEARCH_COMMONS_IMAGES_TOOL_NAME } from './commons';
 
 function fixture() {
   const id = new Types.ObjectId();
@@ -171,16 +172,22 @@ describe('native OpenAI resource wiring', () => {
 
   it('reports unavailable transfers for unmanaged native containers without claiming a resource path', async () => {
     const f = fixture();
+    const agent = {
+      ...f.preparation.agent,
+      tools: [{ type: 'code_interpreter', container: 'cntr_external' }],
+      toolDefinitions: [],
+      toolRegistry: new Map(),
+      activeSkillNames: new Set(['images-commons']),
+    };
     const instructions = await f.resources.prepare({
       ...f.preparation,
       container: { id: () => undefined, client: () => undefined },
-      agent: {
-        ...f.preparation.agent,
-        tools: [{ type: 'code_interpreter', container: 'cntr_external' }],
-      },
+      agent,
     });
     expect(instructions).toContain('unmanaged');
     await expect(f.resources.primeSkill(f.skill, 'primary')).rejects.toThrow('unavailable');
+    expect(agent.toolDefinitions).toEqual([]);
+    expect(f.resources.loadTools([SEARCH_COMMONS_IMAGES_TOOL_NAME], 'primary')).toEqual([]);
     expect(f.fetch).not.toHaveBeenCalled();
     expect(f.getFiles).not.toHaveBeenCalled();
   });
@@ -196,5 +203,37 @@ describe('native OpenAI resource wiring', () => {
     expect(await f.resources.primeSkill(f.skill, 'primary')).toBeUndefined();
     expect(f.fetch).not.toHaveBeenCalled();
     expect(f.getFiles).not.toHaveBeenCalled();
+  });
+
+  it('exposes Commons callbacks only in the prepared agent workspace', async () => {
+    const f = fixture();
+    const agent = {
+      ...f.preparation.agent,
+      tools: [{ type: 'code_interpreter', container: 'cntr_current' }],
+      toolDefinitions: [],
+      toolRegistry: new Map(),
+      activeSkillNames: new Set(['images-commons']),
+    };
+    await f.resources.prepare({
+      ...f.preparation,
+      agent,
+    });
+
+    expect(agent.toolDefinitions.map(({ name }) => name)).toEqual([
+      SEARCH_COMMONS_IMAGES_TOOL_NAME,
+      IMPORT_COMMONS_IMAGE_TOOL_NAME,
+    ]);
+    expect([...agent.toolRegistry.keys()]).toEqual([
+      SEARCH_COMMONS_IMAGES_TOOL_NAME,
+      IMPORT_COMMONS_IMAGE_TOOL_NAME,
+    ]);
+    expect(
+      f.resources.loadTools(
+        [SEARCH_COMMONS_IMAGES_TOOL_NAME, IMPORT_COMMONS_IMAGE_TOOL_NAME],
+        'primary',
+      ),
+    ).toHaveLength(2);
+    expect(f.resources.loadTools([SEARCH_COMMONS_IMAGES_TOOL_NAME], 'secondary')).toEqual([]);
+    expect(f.resources.loadTools([SEARCH_COMMONS_IMAGES_TOOL_NAME])).toEqual([]);
   });
 });

@@ -7,6 +7,23 @@ and compatibility, limitations, and validation notes when available.
 
 ## 2026-09-29
 
+### Import Wikimedia Commons images into native Python workspaces
+
+- Add image search and import tools for agents with the active `images-commons`
+  skill and a managed OpenAI container, preserving source and license metadata.
+- Download supported raster images through the server and upload them directly
+  into the agent's workspace without creating unsolicited attachments.
+- Restrict downloads to Wikimedia image hosts, verify raster decoding and upload
+  integrity, and reject incomplete or incompatible license metadata.
+
+**Validation:** 112 tests passed across Commons services, native resources,
+workspace isolation and tool handlers. API TypeScript, changed-file ESLint,
+formatting and Docker build passed. A real Commons search returned Matterhorn
+photos and downloaded a valid JPEG with its source and license. A browser test
+created a two-slide Matterhorn deck with two embedded Commons photos and source/
+license hyperlinks. Only the PPTX was persisted; its inline download matched the
+stored file byte-for-byte, and both slides were rendered and visually inspected.
+
 ### Keep internal container artifacts out of delivered attachments
 
 - Save native OpenAI container files only when their provider citation matches

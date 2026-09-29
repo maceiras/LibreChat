@@ -1,6 +1,6 @@
 import type { FileMethods } from '@librechat/data-schemas';
 import type { TMessage } from 'librechat-data-provider';
-import type { GraphTools } from '@librechat/agents';
+import type { GenericTool, GraphTools, LCTool, LCToolRegistry } from '@librechat/agents';
 import type { PrimeInvokedSkillsDeps, PrimeSkillFilesParams } from './skillFiles';
 import type { ReusableOpenAIContainer } from './container';
 import type { InitializedAgent } from './initialize';
@@ -8,6 +8,7 @@ import type { ToolExecuteOptions } from './handlers';
 import type { ServerRequest } from '~/types';
 import { collectRestorableFileIds, restoreContainerFiles } from './restoration';
 import { createOpenAISkillResourcePrimer } from './bundles';
+import { prepareCommonsTools } from './commons';
 import { extractInvokedSkillsFromPayload } from './run';
 
 interface NativeResourceDependencies {
@@ -22,8 +23,16 @@ interface NativeResourcePreparation {
   container: Pick<ReusableOpenAIContainer, 'client' | 'id'>;
   agent: Pick<
     InitializedAgent,
-    'id' | 'accessibleSkillIds' | 'manualSkillPrimes' | 'alwaysApplySkillPrimes'
-  > & { tools?: GraphTools };
+    | 'id'
+    | 'accessibleSkillIds'
+    | 'activeSkillNames'
+    | 'manualSkillPrimes'
+    | 'alwaysApplySkillPrimes'
+  > & {
+    tools?: GraphTools;
+    toolDefinitions?: LCTool[];
+    toolRegistry?: LCToolRegistry;
+  };
   conversationId: string;
   history: TMessage[];
   payload: PrimeInvokedSkillsDeps['payload'];
@@ -32,12 +41,14 @@ interface NativeResourcePreparation {
 
 export interface OpenAIResources {
   primeSkill: NonNullable<ToolExecuteOptions['primeOpenAISkill']>;
+  loadTools: (toolNames: string[], agentId?: string) => GenericTool[];
   prepare: (options: NativeResourcePreparation) => Promise<string>;
 }
 
 interface AgentResources {
   primer?: ReturnType<typeof createOpenAISkillResourcePrimer>;
   accessibleIds: Set<string>;
+  tools?: ReadonlyMap<string, GenericTool>;
   unavailable?: string;
 }
 
@@ -62,6 +73,13 @@ export function createOpenAIResources(deps: NativeResourceDependencies): OpenAIR
 
   return {
     primeSkill,
+    loadTools(toolNames, agentId) {
+      const tools = agentId ? workspaces.get(agentId)?.tools : undefined;
+      if (!tools) return [];
+      return toolNames
+        .map((name) => tools.get(name))
+        .filter((tool): tool is GenericTool => tool !== undefined);
+    },
     async prepare({
       container,
       agent,
@@ -94,7 +112,14 @@ export function createOpenAIResources(deps: NativeResourceDependencies): OpenAIR
         getStrategyFunctions: deps.getStrategyFunctions,
         signal,
       });
-      workspaces.set(agent.id, { accessibleIds, primer });
+      const commonsWorkspace = prepareCommonsTools({
+        agent,
+        client,
+        containerId,
+        signal,
+        getSkillByName: deps.getSkillByName,
+      });
+      workspaces.set(agent.id, { accessibleIds, primer, tools: commonsWorkspace?.tools });
 
       const instructions: string[] = [];
       const fresh = new Map(
