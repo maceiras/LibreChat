@@ -728,9 +728,16 @@ export default function mongoMeili(schema: Schema, options: MongoMeiliOptions): 
     doc.postSaveHook?.(next);
   });
 
-  schema.post('updateOne', function (doc: DocumentWithMeiliIndex, next) {
-    doc.postUpdateHook?.(next);
-  });
+  schema.post(
+    'updateOne',
+    { document: true, query: false },
+    function (doc: DocumentWithMeiliIndex, next) {
+      if (typeof doc.postUpdateHook === 'function') {
+        return doc.postUpdateHook(next);
+      }
+      next();
+    },
+  );
 
   schema.post('deleteOne', function (doc: DocumentWithMeiliIndex, next) {
     doc.postRemoveHook?.(next);

@@ -44,6 +44,24 @@ function applyModelSpecSubagents(
   }
 }
 
+type NativeOpenAIParameters = Pick<TConversation, 'code_execution' | 'useResponsesApi'>;
+
+function getNativeOpenAIParameters(
+  conversation: NativeOpenAIParameters,
+  modelSpec: Pick<TModelSpec, 'preset'> | null | undefined,
+): NativeOpenAIParameters {
+  const parameters: NativeOpenAIParameters = {};
+  for (const key of ['code_execution', 'useResponsesApi'] as const) {
+    const conversationValue = conversation[key];
+    const presetValue = modelSpec?.preset?.[key];
+    const value = typeof conversationValue === 'boolean' ? conversationValue : presetValue;
+    if (typeof value === 'boolean') {
+      parameters[key] = value;
+    }
+  }
+  return parameters;
+}
+
 export interface LoadAddedAgentDeps {
   getAgent: (searchParameter: { id: string }) => Promise<Agent | null>;
   getMCPServerTools: (
@@ -118,6 +136,9 @@ export async function loadAddedAgent(
       }
     | undefined;
 
+  const modelSpecs = (appConfig?.modelSpecs as { list?: TModelSpec[] })?.list;
+  const modelSpec = spec != null && spec !== '' ? modelSpecs?.find((s) => s.name === spec) : null;
+
   const primaryIsEphemeral = primaryAgent && isEphemeralAgentId(primaryAgent.id);
   if (primaryIsEphemeral && Array.isArray(primaryAgent.tools)) {
     let endpointConfig = (appConfig?.endpoints as Record<string, unknown> | undefined)?.[
@@ -133,8 +154,6 @@ export async function loadAddedAgent(
       }
     }
 
-    const modelSpecs = (appConfig?.modelSpecs as { list?: TModelSpec[] })?.list;
-    const modelSpec = spec != null && spec !== '' ? modelSpecs?.find((s) => s.name === spec) : null;
     const sender =
       rest.modelLabel ??
       modelSpec?.label ??
@@ -146,7 +165,7 @@ export async function loadAddedAgent(
       id: ephemeralId,
       instructions: promptPrefix || '',
       provider: endpoint,
-      model_parameters: {},
+      model_parameters: getNativeOpenAIParameters(rest, modelSpec),
       model,
       tools: [...primaryAgent.tools],
     };
@@ -158,11 +177,6 @@ export async function loadAddedAgent(
   const mcpServers = new Set<string>(ephemeralAgent?.mcp);
   const userId = req.user?.id ?? '';
 
-  const modelSpecs = (appConfig?.modelSpecs as { list?: TModelSpec[] })?.list;
-  let modelSpec: (typeof modelSpecs extends Array<infer T> | undefined ? T : never) | null = null;
-  if (spec != null && spec !== '') {
-    modelSpec = modelSpecs?.find((s) => s.name === spec) ?? null;
-  }
   if (modelSpec?.mcpServers) {
     for (const mcpServer of modelSpec.mcpServers) {
       mcpServers.add(mcpServer);
@@ -218,6 +232,7 @@ export async function loadAddedAgent(
       model_parameters[key] = (rest as Record<string, unknown>)[key];
     }
   }
+  Object.assign(model_parameters, getNativeOpenAIParameters(rest, modelSpec));
 
   let endpointConfig = (appConfig?.endpoints as Record<string, unknown> | undefined)?.[endpoint] as
     | Record<string, unknown>

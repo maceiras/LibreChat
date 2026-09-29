@@ -7,6 +7,7 @@ import type { PluggableList } from 'unified';
 import { code, codeNoExecution, a, p, table } from './MarkdownComponents';
 import { langSubset, remarkApproxTilde } from '~/utils';
 import { CodeBlockProvider } from '~/Providers';
+import { markdownUrlTransform } from './links';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -60,6 +61,7 @@ class MarkdownErrorBoundary extends React.Component<
       return (
         <CodeBlockProvider>
           <ReactMarkdown
+            urlTransform={markdownUrlTransform}
             remarkPlugins={[
               remarkApproxTilde,
               /** @ts-ignore */

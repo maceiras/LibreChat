@@ -14,6 +14,10 @@ import type { RunLLMConfig } from '~/types';
 import { resolveConfigHeaders } from '~/utils/headers';
 
 const idleTimeout = 20 * 60 * 1000;
+const stableTurnBody = {
+  messageId: '__LIBRECHAT_OPENAI_CONTAINER_MESSAGE_ID__',
+  parentMessageId: '__LIBRECHAT_OPENAI_CONTAINER_PARENT_MESSAGE_ID__',
+};
 const sessionSchema = z.object({
   id: z.string().regex(/^cntr_[a-zA-Z0-9_-]{1,128}$/),
   updatedAt: z.number().int().nonnegative(),
@@ -30,7 +34,13 @@ const outputSchema = z.object({
 const automaticToolSchema = z
   .object({
     type: z.literal('code_interpreter'),
-    container: z.object({ type: z.literal('auto') }).passthrough(),
+    container: z
+      .object({
+        type: z.literal('auto'),
+        memory_limit: z.enum(['1g', '4g', '16g', '64g']).optional(),
+        file_ids: z.array(z.string()).optional(),
+      })
+      .passthrough(),
   })
   .passthrough();
 const resetInstructions =
@@ -55,6 +65,8 @@ interface ContainerOptions {
   history: Pick<TMessage, 'messageId' | 'conversationId' | 'isCreatedByUser' | 'metadata'>[];
   claim: MessageMethods['claimOpenAIContainer'];
   signal: AbortSignal;
+  /** Create a native OpenAI container before the run when files must be staged. */
+  ensureExplicit?: boolean;
   now?: () => number;
 }
 
@@ -68,8 +80,15 @@ interface ContainerAgent {
 
 export interface ReusableOpenAIContainer<T extends ContainerAgent = InitializedAgent> {
   agent: T;
+  id: () => string | undefined;
+  client: () => CustomOpenAIClient | undefined;
   wrapHandler: (handler: EventHandler) => EventHandler;
   snapshot: () => OpenAIContainerSession | undefined;
+}
+
+function containerName(conversationId: string): string {
+  const suffix = conversationId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48);
+  return `librechat-${suffix || 'conversation'}`;
 }
 
 function lastContainer(output: NonNullable<ModelEndData>['output']): string | undefined {
@@ -98,12 +117,15 @@ export async function prepareOpenAIContainer<T extends ContainerAgent>(
     history,
     claim,
     signal,
+    ensureExplicit = false,
     now = Date.now,
   }: ContainerOptions,
 ): Promise<ReusableOpenAIContainer<T>> {
   let current: OpenAIContainerSession | undefined;
   const unchanged: ReusableOpenAIContainer<T> = {
     agent,
+    id: () => undefined,
+    client: () => undefined,
     wrapHandler: (handler) => handler,
     snapshot: () => undefined,
   };
@@ -129,24 +151,54 @@ export async function prepareOpenAIContainer<T extends ContainerAgent>(
   if (!parsedTool.success) return unchanged;
   const apiKey = options.apiKey;
 
-  const clientOptions = { ...options, configuration: { ...options.configuration } };
-  resolveConfigHeaders({
-    llmConfig: clientOptions as RunLLMConfig,
-    user: user ?? { id: userId },
-    body: { messageId, conversationId, parentMessageId },
+  const resolveClientOptions = (body: {
+    messageId: string;
+    conversationId: string;
+    parentMessageId?: string;
+  }) => {
+    const configuration = { ...options.configuration };
+    const resolved = { ...options, configuration };
+    resolveConfigHeaders({
+      llmConfig: resolved as RunLLMConfig,
+      user: user ?? { id: userId },
+      body,
+    });
+    return resolved;
+  };
+
+  /**
+   * Resolve the outbound headers and the signed identity independently from the
+   * original templates. The latter substitutes stable sentinels only for values
+   * that identify an individual turn. Static, environment, user, auth and
+   * conversation-scoped header values remain part of the signature, while a new
+   * message/parent pair does not invalidate an otherwise reusable container.
+   * Keeping the two resolutions independent also prevents a user-derived value
+   * from being passed through environment expansion a second time.
+   */
+  const clientOptions = resolveClientOptions({ messageId, conversationId, parentMessageId });
+  const scopeOptions = resolveClientOptions({
+    ...stableTurnBody,
+    conversationId,
   });
   const config = clientOptions.configuration;
+  const scopeConfig = scopeOptions.configuration;
+  const client = new CustomOpenAIClient({
+    ...config,
+    apiKey,
+    timeout: 10_000,
+    maxRetries: 0,
+  });
   const scope = JSON.stringify([
     userId,
     tenantId ?? '',
     conversationId,
     agent.id,
     agent.provider,
-    config?.baseURL ?? 'https://api.openai.com/v1',
-    config?.organization,
-    config?.project,
-    Object.entries(config?.defaultHeaders ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-    config?.defaultQuery,
+    scopeConfig?.baseURL ?? 'https://api.openai.com/v1',
+    scopeConfig?.organization,
+    scopeConfig?.project,
+    Object.entries(scopeConfig?.defaultHeaders ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    scopeConfig?.defaultQuery,
     parsedTool.data.container,
   ]);
   const sign = (id: string, updatedAt: number, responseId: string) =>
@@ -174,22 +226,17 @@ export async function prepareOpenAIContainer<T extends ContainerAgent>(
     ) {
       break;
     }
-    const claimed = await claim({
-      userId,
-      conversationId,
-      messageId: message.messageId,
-      signature,
-    });
-    if (!claimed) break;
-    const client = new CustomOpenAIClient({
-      ...config,
-      apiKey,
-      timeout: 10_000,
-      maxRetries: 0,
-    });
     try {
       const container = await client.containers.retrieve(prior.id, { signal });
       if (container.status === 'running' || container.status === 'active') {
+        if (signal.aborted) break;
+        const claimed = await claim({
+          userId,
+          conversationId,
+          messageId: message.messageId,
+          signature: prior.signature,
+        });
+        if (!claimed) break;
         remember(prior.id, now());
         reset = false;
       }
@@ -197,6 +244,21 @@ export async function prepareOpenAIContainer<T extends ContainerAgent>(
       if (!(error instanceof CustomOpenAIClient.APIError) || error.status !== 404) throw error;
     }
     break;
+  }
+
+  if (!current && ensureExplicit && !signal.aborted) {
+    const { memory_limit, file_ids } = parsedTool.data.container;
+    const container = await client.containers.create(
+      {
+        name: containerName(conversationId),
+        ...(memory_limit !== undefined && { memory_limit }),
+        ...(file_ids !== undefined && { file_ids }),
+      },
+      { signal },
+    );
+    if (!signal.aborted) {
+      remember(container.id, now());
+    }
   }
 
   return {
@@ -212,6 +274,8 @@ export async function prepareOpenAIContainer<T extends ContainerAgent>(
           .join('\n\n'),
       }),
     },
+    id: () => current?.id,
+    client: () => client,
     snapshot: () => (current ? { ...current } : undefined),
     wrapHandler: (handler) => ({
       async handle(event, data, metadata, graph) {

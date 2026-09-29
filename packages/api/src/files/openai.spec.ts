@@ -8,8 +8,10 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { AIMessageChunk } from '@librechat/agents/langchain/messages';
 import { GraphEvents, Providers, StandardGraph } from '@librechat/agents';
 import type { IMongoFile } from '@librechat/data-schemas';
+import type { ResponseProgress } from 'librechat-data-provider';
 import type { SaveBufferParams } from '~/storage/types';
 import type { ServerRequest } from '~/types';
+import { createResponseProgress } from '../agents/progress';
 import { createOpenAIFileHandler } from './openai';
 
 const File = model<IMongoFile>('OpenAIOutputTest', fileSchema);
@@ -24,6 +26,14 @@ const metadata = {
   thread_id: 'conversation',
   langgraph_node: 'agent=agent',
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 describe('Responses container files', () => {
   let directory: string;
@@ -101,7 +111,13 @@ describe('Responses container files', () => {
       getRetentionExpiry: async () => ({ expiredAt }),
     });
     const output = new AIMessageChunk({
-      content: [{ type: 'text', text: 'Download the report.', annotations: [citation, citation] }],
+      content: [
+        {
+          type: 'text',
+          text: '[Download the report](sandbox:/mnt/data/report.csv)',
+          annotations: [citation, citation],
+        },
+      ],
     });
     const invoke = () => handler.handle(GraphEvents.CHAT_MODEL_END, { output }, metadata, graph);
     return {
@@ -171,7 +187,7 @@ describe('Responses container files', () => {
       test.output.content = [
         {
           type: 'text',
-          text: 'Here is the chart.',
+          text: `![Chart](sandbox:/mnt/data/chart.${format})`,
           annotations: [{ ...citation, filename: `/mnt/data/chart.${format}` }],
         },
       ];
@@ -214,7 +230,7 @@ describe('Responses container files', () => {
     test.output.content = [
       {
         type: 'text',
-        text: '',
+        text: '![Chart](sandbox:/mnt/data/chart.png) [Report](sandbox:/mnt/data/report.csv)',
         annotations: [{ ...citation, file_id: 'cfile_image', filename: 'chart.png' }, citation],
       },
     ];
@@ -239,7 +255,11 @@ describe('Responses container files', () => {
     const test = setup();
     test.fetch.mockImplementation(async () => new Response(payload));
     test.output.content = [
-      { type: 'text', text: '', annotations: [{ ...citation, filename: 'chart.png' }] },
+      {
+        type: 'text',
+        text: '![Chart](sandbox:/mnt/data/chart.png)',
+        annotations: [{ ...citation, filename: 'chart.png' }],
+      },
     ];
 
     await expect(test.invoke()).resolves.toBeUndefined();
@@ -257,7 +277,7 @@ describe('Responses container files', () => {
     test.output.content = [
       {
         type: 'text',
-        text: '',
+        text: '[Download the report](sandbox:/mnt/data/report.csv)',
         annotations: [
           {
             type: 'citation',
@@ -273,6 +293,146 @@ describe('Responses container files', () => {
     expect(test.onFile).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps only the explicitly linked deliverable and ignores unlinked reports and inspection images', async () => {
+    const test = setup();
+    test.output.content = [
+      {
+        type: 'text',
+        text: '[Download the deck](sandbox:/mnt/data/marmottes.pptx)',
+        annotations: [
+          { ...citation, file_id: 'cfile_deck', filename: '/mnt/data/marmottes.pptx' },
+          { ...citation, file_id: 'cfile_report', filename: '/mnt/data/render.json' },
+          { ...citation, file_id: 'cfile_preview', filename: 'cfile_preview.png' },
+        ],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.fetch).toHaveBeenCalledTimes(1);
+    expect(String(test.fetch.mock.calls[0][0])).toContain('/files/cfile_deck/content');
+    expect(test.onFile).toHaveBeenCalledTimes(1);
+    expect(test.onFile.mock.calls[0][0]).toMatchObject({ filename: 'marmottes.pptx' });
+  });
+
+  it('keeps explicitly linked JSON and images using a decoded full path or unique basename', async () => {
+    const test = setup();
+    test.output.content = [
+      {
+        type: 'text',
+        text:
+          '[JSON report](sandbox:/mnt/data/reports/My%20Report.json) ' +
+          '![Requested image](sandbox:/mnt/data/exports/result.png)',
+        annotations: [
+          {
+            ...citation,
+            file_id: 'cfile_json',
+            filename: '/mnt/data/reports/My Report.json',
+          },
+          {
+            type: 'citation',
+            source: 'container_file_citation',
+            title: 'result.png',
+            container_id: citation.container_id,
+            file_id: 'cfile_image',
+          },
+        ],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.fetch).toHaveBeenCalledTimes(2);
+    expect(test.onFile.mock.calls.map(([file]: [IMongoFile]) => file.filename)).toEqual([
+      'My Report.json',
+      'result.png',
+    ]);
+  });
+
+  it('requires an unqualified citation basename to identify one linked path and one citation', async () => {
+    const test = setup();
+    test.output.content = [
+      {
+        type: 'text',
+        text:
+          '[First](sandbox:/mnt/data/first/render.json) ' +
+          '[Second](sandbox:/mnt/data/second/render.json)',
+        annotations: [{ ...citation, file_id: 'cfile_render', filename: 'render.json' }],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.fetch).not.toHaveBeenCalled();
+    expect(test.createFile).not.toHaveBeenCalled();
+    expect(test.onFile).not.toHaveBeenCalled();
+  });
+
+  it('uses a valid full path to select one of several citations with the same basename', async () => {
+    const test = setup();
+    test.output.content = [
+      {
+        type: 'text',
+        text: '[Approved](sandbox:/mnt/data/approved/report.json)',
+        annotations: [
+          {
+            ...citation,
+            file_id: 'cfile_approved',
+            filename: '/mnt/data/approved/report.json',
+          },
+          {
+            ...citation,
+            file_id: 'cfile_internal',
+            filename: '/mnt/data/internal/report.json',
+          },
+          { ...citation, file_id: 'cfile_bare', filename: 'report.json' },
+        ],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.fetch).toHaveBeenCalledTimes(1);
+    expect(String(test.fetch.mock.calls[0][0])).toContain('/files/cfile_approved/content');
+  });
+
+  it('does not treat plain paths, code output, or external URLs as delivered files', async () => {
+    const test = setup();
+    test.output.content = [
+      {
+        type: 'text',
+        text:
+          '`sandbox:/mnt/data/report.csv`\n' +
+          '`[Inline example](sandbox:/mnt/data/report.csv)`\n' +
+          '```markdown\n[Fenced example](sandbox:/mnt/data/report.csv)\n```\n' +
+          '    [Indented example](sandbox:/mnt/data/report.csv)\n' +
+          '\\[Escaped example](sandbox:/mnt/data/report.csv)\n' +
+          '[Missing close](sandbox:/mnt/data/report.csv\n' +
+          '[External](https://example.test/sandbox:/mnt/data/report.csv)',
+        annotations: [citation],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not guess when two citations claim the same explicit full path', async () => {
+    const test = setup();
+    test.output.content = [
+      {
+        type: 'text',
+        text: '[Report](sandbox:/mnt/data/report.csv)',
+        annotations: [citation, { ...citation, file_id: 'cfile_duplicate' }],
+      },
+    ];
+
+    await test.invoke();
+
+    expect(test.fetch).not.toHaveBeenCalled();
+  });
+
   it.each([{ provider: Providers.ANTHROPIC }, { useResponsesApi: false }])(
     'ignores non-Responses output: %j',
     async (options) => {
@@ -282,6 +442,203 @@ describe('Responses container files', () => {
       expect(test.previousHandler.handle).toHaveBeenCalledTimes(1);
     },
   );
+
+  describe('sequential-agent visibility', () => {
+    it('does not fetch, persist, or publish files from a hidden intermediate agent', async () => {
+      const test = setup();
+
+      await test.handler.handle(
+        GraphEvents.CHAT_MODEL_END,
+        { output: test.output },
+        {
+          ...metadata,
+          last_agent_id: 'final-agent',
+          hide_sequential_outputs: true,
+        },
+        test.graph,
+      );
+
+      expect(test.previousHandler.handle).toHaveBeenCalledTimes(1);
+      expect(test.fetch).not.toHaveBeenCalled();
+      expect(test.onProgress).not.toHaveBeenCalled();
+      expect(test.saveBuffer).not.toHaveBeenCalled();
+      expect(test.createFile).not.toHaveBeenCalled();
+      expect(test.onFile).not.toHaveBeenCalled();
+      expect(test.onError).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing', {}],
+      ['empty', { last_agent_id: '' }],
+    ] as const)(
+      'fails closed when hidden sequential output has a %s last_agent_id',
+      async (_case, metadataOverride) => {
+        const test = setup();
+
+        await test.handler.handle(
+          GraphEvents.CHAT_MODEL_END,
+          { output: test.output },
+          {
+            ...metadata,
+            ...metadataOverride,
+            hide_sequential_outputs: true,
+          },
+          test.graph,
+        );
+
+        expect(test.previousHandler.handle).toHaveBeenCalledTimes(1);
+        expect(test.fetch).not.toHaveBeenCalled();
+        expect(test.onProgress).not.toHaveBeenCalled();
+        expect(test.saveBuffer).not.toHaveBeenCalled();
+        expect(test.createFile).not.toHaveBeenCalled();
+        expect(test.onFile).not.toHaveBeenCalled();
+        expect(test.onError).not.toHaveBeenCalled();
+      },
+    );
+
+    it('persists files from the last agent when sequential outputs are hidden', async () => {
+      const test = setup();
+
+      await test.handler.handle(
+        GraphEvents.CHAT_MODEL_END,
+        { output: test.output },
+        {
+          ...metadata,
+          last_agent_id: 'agent',
+          hide_sequential_outputs: true,
+        },
+        test.graph,
+      );
+
+      expect(test.fetch).toHaveBeenCalledTimes(1);
+      expect(test.createFile).toHaveBeenCalledTimes(1);
+      expect(test.onFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('persists files from an intermediate agent when sequential outputs are visible', async () => {
+      const test = setup();
+
+      await test.handler.handle(
+        GraphEvents.CHAT_MODEL_END,
+        { output: test.output },
+        {
+          ...metadata,
+          last_agent_id: 'final-agent',
+          hide_sequential_outputs: false,
+        },
+        test.graph,
+      );
+
+      expect(test.fetch).toHaveBeenCalledTimes(1);
+      expect(test.createFile).toHaveBeenCalledTimes(1);
+      expect(test.onFile).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('response progress lifecycle', () => {
+    it('waits for every visible file and reports an incomplete response after a partial failure', async () => {
+      const test = setup();
+      const snapshots: ResponseProgress[] = [];
+      const secondDownload = deferred<Response>();
+      const secondStarted = deferred<void>();
+      let time = 1_000;
+      const progress = createResponseProgress(
+        (snapshot) => {
+          snapshots.push(snapshot);
+        },
+        () => time,
+      );
+      progress.bind(metadata.run_id, new AbortController().signal);
+      await progress.stage('preparing');
+      test.onProgress.mockImplementation(() => progress.stage('files'));
+      test.onError.mockImplementation(() => progress.markIncomplete());
+      test.fetch
+        .mockImplementationOnce(async () => new Response('expired', { status: 404 }))
+        .mockImplementationOnce(() => {
+          secondStarted.resolve();
+          return secondDownload.promise;
+        });
+      test.output.content = [
+        {
+          type: 'text',
+          text: '[Expired](sandbox:/mnt/data/expired.csv) [Ready](sandbox:/mnt/data/ready.csv)',
+          annotations: [
+            { ...citation, file_id: 'cfile_expired', filename: '/mnt/data/expired.csv' },
+            { ...citation, file_id: 'cfile_ready', filename: '/mnt/data/ready.csv' },
+          ],
+        },
+      ];
+
+      const invocation = test.handler.handle(
+        GraphEvents.CHAT_MODEL_END,
+        { output: test.output },
+        {
+          ...metadata,
+          last_agent_id: 'final-agent',
+          hide_sequential_outputs: false,
+        },
+        test.graph,
+      );
+      await secondStarted.promise;
+
+      expect(progress.snapshot()).toMatchObject({ status: 'running' });
+      expect(progress.snapshot()?.endedAt).toBeUndefined();
+      time = 2_000;
+      await progress.stage('responding');
+      expect(progress.snapshot()?.steps.map((step) => step.stage)).toEqual([
+        'preparing',
+        'files',
+        'responding',
+      ]);
+
+      secondDownload.resolve(new Response('a,b\n1,2\n'));
+      await invocation;
+
+      expect(test.onError).toHaveBeenCalledTimes(1);
+      expect(test.onFile).toHaveBeenCalledTimes(1);
+      expect(test.onFile.mock.calls[0][0]).toMatchObject({ filename: 'ready.csv' });
+      expect(progress.snapshot()).toMatchObject({ status: 'running' });
+      time = 3_000;
+      await progress.finish('completed');
+      expect(progress.snapshot()).toMatchObject({ status: 'incomplete', endedAt: 3_000 });
+      expect(snapshots[snapshots.length - 1]).toMatchObject({
+        status: 'incomplete',
+        endedAt: 3_000,
+      });
+    });
+
+    it('keeps cancellation terminal when a file download rejects after abort', async () => {
+      const test = setup();
+      const controller = new AbortController();
+      const downloadStarted = deferred<void>();
+      const progress = createResponseProgress(jest.fn());
+      progress.bind(metadata.run_id, controller.signal);
+      test.graph.signal = controller.signal;
+      test.onProgress.mockImplementation(() => progress.stage('files'));
+      test.onError.mockImplementation(() => progress.markIncomplete());
+      test.fetch.mockImplementation(
+        (_url: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            downloadStarted.resolve();
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(init.signal?.reason ?? new Error('aborted')),
+              { once: true },
+            );
+          }),
+      );
+
+      const invocation = test.invoke();
+      await downloadStarted.promise;
+      controller.abort();
+      await invocation;
+
+      expect(test.onError).toHaveBeenCalledTimes(1);
+      expect(progress.snapshot()?.status).toBe('cancelled');
+      await progress.finish('completed');
+      expect(progress.snapshot()?.status).toBe('cancelled');
+    });
+  });
 
   it('ignores text links and non-container or malformed annotations', async () => {
     const test = setup();
@@ -313,19 +670,26 @@ describe('Responses container files', () => {
     expect(test.previousHandler.handle).toHaveBeenCalledTimes(1);
     expect(test.onFile).not.toHaveBeenCalled();
     expect(test.output.content).toEqual(
-      expect.arrayContaining([expect.objectContaining({ text: 'Download the report.' })]),
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: '[Download the report](sandbox:/mnt/data/report.csv)',
+        }),
+      ]),
     );
   });
 
-  it('uses an opaque storage name even for path traversal in the filename', async () => {
+  it('does not use basename fallback for a citation containing path traversal', async () => {
     const test = setup();
     test.output.content = [
-      { type: 'text', text: '', annotations: [{ ...citation, filename: '../../outside.csv' }] },
+      {
+        type: 'text',
+        text: '[Download](sandbox:/mnt/data/outside.csv)',
+        annotations: [{ ...citation, filename: '../../outside.csv' }],
+      },
     ];
     await test.invoke();
-    const file = test.onFile.mock.calls[0][0] as IMongoFile;
-    expect(file.filename).toBe('outside.csv');
-    expect(path.dirname(file.filepath)).toBe(directory);
-    expect(path.basename(file.filepath)).toMatch(/^[0-9a-f-]+\.csv$/);
+    expect(test.fetch).not.toHaveBeenCalled();
+    expect(test.saveBuffer).not.toHaveBeenCalled();
+    expect(test.onFile).not.toHaveBeenCalled();
   });
 });

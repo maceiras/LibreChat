@@ -161,6 +161,30 @@ describe('initializeClient — processAgent ACL gate', () => {
     );
   });
 
+  it('defers incomplete file progress until the response finishes', async () => {
+    const controller = new AbortController();
+    mockInitializeAgent.mockResolvedValue(makePrimaryConfig([]));
+    await initializeClient({
+      req: makeReq(),
+      res: { headersSent: true, writableEnded: false, write: jest.fn() },
+      signal: controller.signal,
+      endpointOption: makeEndpointOption(),
+    });
+
+    const { openAIFileOptions } = getDefaultHandlers.mock.calls[0][0];
+    const progress = agentClientArgs.responseProgress;
+    progress.bind('response-1', controller.signal);
+    await openAIFileOptions.onProgress();
+    await openAIFileOptions.onError();
+    expect(progress.snapshot().status).toBe('running');
+    expect(progress.snapshot().endedAt).toBeUndefined();
+
+    await openAIFileOptions.onProgress();
+    await progress.finish('completed');
+    expect(progress.snapshot().status).toBe('incomplete');
+    expect(progress.snapshot().endedAt).toEqual(expect.any(Number));
+  });
+
   it('should skip handoff agent and filter its edge when user lacks VIEW access', async () => {
     await createAgent({
       id: TARGET_ID,

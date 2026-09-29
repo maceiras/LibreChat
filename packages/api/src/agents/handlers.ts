@@ -13,7 +13,7 @@ import type {
 } from '@librechat/agents';
 import type { StructuredToolInterface } from '@librechat/agents/langchain/tools';
 import type { CodeEnvRef } from 'librechat-data-provider';
-import type { SkillFileRecord } from './skillFiles';
+import type { SkillFileRecord, PrimeSkillFilesParams } from './skillFiles';
 import type { ServerRequest } from '~/types';
 import {
   CREATE_FILE_TOOL_NAME,
@@ -48,6 +48,10 @@ export type ToolEndCallback = (
 ) => Promise<void>;
 
 export interface ToolExecuteOptions {
+  primeOpenAISkill?: (
+    skill: PrimeSkillFilesParams['skill'],
+    agentId?: string,
+  ) => Promise<string | undefined>;
   /** Loads tools by name, using agentId to look up agent-specific context */
   loadTools: (
     toolNames: string[],
@@ -2508,6 +2512,7 @@ async function handleReadFileCall(
   mergedConfigurable: Record<string, unknown>,
   options: ToolExecuteOptions,
   req?: ServerRequest,
+  agentId?: string,
 ): Promise<ToolExecuteResult> {
   const { getSkillByName, getSkillFileByPath, getStrategyFunctions, updateSkillFileContent } =
     options;
@@ -2763,7 +2768,12 @@ async function handleReadFileCall(
     return {
       toolCallId: tc.id,
       status: 'success',
-      content: `File: ${args.path}\n\n${addLineNumbers(skill.body)}`,
+      content: [
+        `File: ${args.path}\n\n${addLineNumbers(skill.body)}`,
+        await options.primeOpenAISkill?.(skill, agentId),
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
     };
   }
 
@@ -2794,7 +2804,9 @@ async function handleReadFileCall(
       return {
         toolCallId: tc.id,
         status: 'success',
-        content: `Binary file (${file.mimeType}, ${file.bytes} bytes). Use bash to process: /mnt/data/${args.path}`,
+        content:
+          (await options.primeOpenAISkill?.(skill, agentId)) ??
+          `Binary file (${file.mimeType}, ${file.bytes} bytes). Use bash to process: /mnt/data/${args.path}`,
       };
     }
   }
@@ -2814,14 +2826,18 @@ async function handleReadFileCall(
     return {
       toolCallId: tc.id,
       status: 'success',
-      content: `File "${args.path}" is too large to read directly (${file.bytes} bytes, limit: ${MAX_READABLE_BYTES}). Invoke the skill first, then use bash to read it at /mnt/data/${args.path}.`,
+      content:
+        (await options.primeOpenAISkill?.(skill, agentId)) ??
+        `File "${args.path}" is too large to read directly (${file.bytes} bytes, limit: ${MAX_READABLE_BYTES}). Invoke the skill first, then use bash to read it at /mnt/data/${args.path}.`,
     };
   }
   if (isImage && file.bytes > MAX_BINARY_BYTES) {
     return {
       toolCallId: tc.id,
       status: 'success',
-      content: `File too large (${file.bytes} bytes, limit: ${MAX_BINARY_BYTES}). Use bash to process: /mnt/data/${args.path}`,
+      content:
+        (await options.primeOpenAISkill?.(skill, agentId)) ??
+        `File too large (${file.bytes} bytes, limit: ${MAX_BINARY_BYTES}). Use bash to process: /mnt/data/${args.path}`,
     };
   }
 
@@ -2865,7 +2881,9 @@ async function handleReadFileCall(
         return {
           toolCallId: tc.id,
           status: 'success',
-          content: `File "${args.path}" exceeded streaming limit (${streamLimit} bytes). Invoke the skill first, then use bash to read it at /mnt/data/${args.path}.`,
+          content:
+            (await options.primeOpenAISkill?.(skill, agentId)) ??
+            `File "${args.path}" exceeded streaming limit (${streamLimit} bytes). Invoke the skill first, then use bash to read it at /mnt/data/${args.path}.`,
         };
       }
       chunks.push(chunk);
@@ -2919,7 +2937,9 @@ async function handleReadFileCall(
       return {
         toolCallId: tc.id,
         status: 'success',
-        content: `Binary file (${file.mimeType}, ${buffer.length} bytes). Use bash to process: /mnt/data/${args.path}`,
+        content:
+          (await options.primeOpenAISkill?.(skill, agentId)) ??
+          `Binary file (${file.mimeType}, ${buffer.length} bytes). Use bash to process: /mnt/data/${args.path}`,
       };
     }
 
@@ -2941,7 +2961,9 @@ async function handleReadFileCall(
       return {
         toolCallId: tc.id,
         status: 'success',
-        content: `File too large (${buffer.length} bytes, limit: ${MAX_READABLE_BYTES}). Use bash: cat /mnt/data/${args.path}`,
+        content:
+          (await options.primeOpenAISkill?.(skill, agentId)) ??
+          `File too large (${buffer.length} bytes, limit: ${MAX_READABLE_BYTES}). Use bash: cat /mnt/data/${args.path}`,
       };
     }
 
@@ -2965,6 +2987,7 @@ async function handleSkillToolCall(
   mergedConfigurable: Record<string, unknown>,
   options: ToolExecuteOptions,
   req?: ServerRequest,
+  agentId?: string,
 ): Promise<ToolExecuteResult> {
   const {
     getSkillByName,
@@ -3037,6 +3060,10 @@ async function handleSkillToolCall(
     body = body.replace(/\$ARGUMENTS/g, args.args);
   }
 
+  const resourceInstructions = await options.primeOpenAISkill?.(skill, agentId);
+  if (resourceInstructions) {
+    body = `${body}\n\n${resourceInstructions}`;
+  }
   const injectedMessages: InjectedMessage[] = [buildSkillPrimeMessage({ name: skill.name, body })];
 
   const contentText = `Skill "${args.skillName}" loaded. Follow the instructions below.`;
@@ -3215,6 +3242,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           mergedConfigurable,
                           options,
                           req,
+                          agentId,
                         );
                       } else if (tc.name === Constants.READ_FILE) {
                         handlerResult = await handleReadFileCall(
@@ -3222,6 +3250,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           mergedConfigurable,
                           options,
                           req,
+                          agentId,
                         );
                       } else if (tc.name === CREATE_FILE_TOOL_NAME && isFileAuthoringCall) {
                         handlerResult = await handleCreateFileCall(

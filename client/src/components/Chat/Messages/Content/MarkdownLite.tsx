@@ -9,6 +9,7 @@ import type { PluggableList } from 'unified';
 import { code, codeNoExecution, a, p, img, table } from './MarkdownComponents';
 import { CodeBlockProvider, ArtifactProvider } from '~/Providers';
 import MarkdownErrorBoundary from './MarkdownErrorBoundary';
+import { markdownUrlTransform } from './links';
 import { langSubset, remarkApproxTilde } from '~/utils';
 
 const MarkdownLite = memo(
@@ -30,6 +31,7 @@ const MarkdownLite = memo(
         <ArtifactProvider>
           <CodeBlockProvider>
             <ReactMarkdown
+              urlTransform={markdownUrlTransform}
               remarkPlugins={[
                 remarkApproxTilde,
                 /** @ts-ignore */

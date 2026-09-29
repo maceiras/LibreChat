@@ -4,6 +4,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import mongoMeili, { type SchemaWithMeiliMethods } from '~/models/plugins/mongoMeili';
 import { createConversationModel } from '~/models/convo';
 import { createMessageModel } from '~/models/message';
+import { createMessageMethods } from '~/methods/message';
 
 interface DynamicMeiliDocument extends mongoose.Document {
   docId: string;
@@ -52,6 +53,20 @@ const createDynamicMeiliModel = (modelName: string): DynamicMeiliModel => {
 };
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const within = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Operation exceeded ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
 
 const mockAddDocuments = jest.fn();
 const mockAddDocumentsInBatches = jest.fn();
@@ -274,6 +289,66 @@ describe('Meilisearch Mongoose plugin', () => {
       [expect.objectContaining({ messageId: expect.anything() })],
       { primaryKey: 'messageId' },
     );
+  });
+
+  test('document updateOne still forwards indexed messages to Meilisearch', async () => {
+    const messageModel = createMessageModel(mongoose);
+    const messageId = new mongoose.Types.ObjectId().toString();
+    const msg = await messageModel.create({
+      messageId,
+      conversationId: new mongoose.Types.ObjectId(),
+      user: new mongoose.Types.ObjectId(),
+      isCreatedByUser: true,
+      text: 'Original text',
+    });
+    mockUpdateDocuments.mockClear();
+
+    msg._meiliIndex = true;
+    msg.text = 'Updated through document updateOne';
+    await msg.updateOne({ $set: { text: msg.text } });
+
+    expect(mockUpdateDocuments).toHaveBeenCalledWith(
+      [expect.objectContaining({ messageId, text: msg.text })],
+      { primaryKey: 'messageId' },
+    );
+  });
+
+  test('query updateOne completes a native container claim without Meilisearch document hooks', async () => {
+    const messageModel = createMessageModel(mongoose);
+    const messageId = new mongoose.Types.ObjectId().toString();
+    const conversationId = new mongoose.Types.ObjectId().toString();
+    const userId = new mongoose.Types.ObjectId().toString();
+    const signature = 'a'.repeat(64);
+    await messageModel.create({
+      messageId,
+      conversationId,
+      user: userId,
+      isCreatedByUser: false,
+      metadata: {
+        openAIContainer: { id: 'cntr_test', updatedAt: 1000, signature },
+      },
+    });
+    mockUpdateDocuments.mockClear();
+
+    await expect(
+      within(
+        createMessageMethods(mongoose).claimOpenAIContainer({
+          userId,
+          conversationId,
+          messageId,
+          signature,
+        }),
+        1000,
+      ),
+    ).resolves.toBe(true);
+
+    expect(mockUpdateDocuments).not.toHaveBeenCalled();
+    await expect(
+      messageModel.exists({
+        messageId,
+        'metadata.openAIContainerClaimed': true,
+      }),
+    ).resolves.not.toBeNull();
   });
 
   test('deleteObjectFromMeili calls deleteDocument with messageId, not _id', async () => {

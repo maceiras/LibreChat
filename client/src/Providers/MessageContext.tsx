@@ -1,4 +1,5 @@
 import { createContext, useContext } from 'react';
+import type { TAttachment } from 'librechat-data-provider';
 
 type MessageContext = {
   messageId: string;
@@ -10,6 +11,7 @@ type MessageContext = {
   isSubmitting?: boolean;
   /** Whether this is the latest message in the conversation */
   isLatestMessage?: boolean;
+  attachments?: TAttachment[];
 };
 
 export const MessageContext = createContext<MessageContext>({} as MessageContext);

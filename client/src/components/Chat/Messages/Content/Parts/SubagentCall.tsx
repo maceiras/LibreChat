@@ -279,8 +279,9 @@ export default function SubagentCall({
       isSubmitting: running,
       isLatestMessage: running,
       conversationId: null,
+      attachments,
     }),
-    [toolCallId, running],
+    [toolCallId, running, attachments],
   );
 
   const lastPartIndex = contentParts.length - 1;

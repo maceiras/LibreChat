@@ -4,6 +4,7 @@ const {
   loadSkillStates,
   initializeAgent,
   createResponseProgress,
+  createOpenAIResources,
   primeInvokedSkills,
   validateAgentModel,
   extractManualSkills,
@@ -197,6 +198,12 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
    */
   const agentToolContexts = new Map();
 
+  const openAIResources = createOpenAIResources({
+    req,
+    getFiles: db.getFiles,
+    ...getSkillToolDeps(),
+  });
+
   const toolExecuteOptions = {
     loadTools: async (toolNames, agentId) => {
       const ctx = agentToolContexts.get(agentId) ?? {};
@@ -232,6 +239,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     },
     toolEndCallback,
     ...getSkillToolDeps(),
+    primeOpenAISkill: openAIResources.primeSkill,
   };
 
   const summarizationOptions =
@@ -281,7 +289,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
       createFile: db.createFile,
       imageSource: getFileStrategy(req.config, { isImage: true }),
       onProgress: () => responseProgress.stage('files'),
-      onError: () => responseProgress.finish('incomplete'),
+      onError: () => responseProgress.markIncomplete(),
     },
     toolExecuteOptions,
     summarizationOptions,
@@ -959,6 +967,7 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
     aggregateContent,
     artifactPromises,
     primeInvokedSkills: handlePrimeInvokedSkills,
+    openAIResources,
     responseProgress,
     agent: primaryConfig,
     spec: endpointOption.spec,

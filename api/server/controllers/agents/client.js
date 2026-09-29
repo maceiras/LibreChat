@@ -5,6 +5,8 @@ const {
   createRun,
   withResponseProgress,
   prepareOpenAIContainer,
+  prepareOpenAIWorkspaces,
+  collectRestorableFileIds,
   isEnabled,
   checkAccess,
   buildToolSet,
@@ -1167,6 +1169,18 @@ class AgentClient extends BaseClient {
         abortController = new AbortController();
       }
 
+      const responseAgent = this.options.responseProgress
+        ? withResponseProgress(
+            this.options.agent,
+            this.options.responseProgress,
+            this.responseMessageId,
+            abortController.signal,
+          )
+        : this.options.agent;
+      if (!abortController.signal.aborted) {
+        await this.options.responseProgress?.stage('preparing');
+      }
+
       /** @type {AppConfig['endpoints']['agents']} */
       const agentsEConfig = appConfig.endpoints?.[EModelEndpoint.agents];
 
@@ -1193,7 +1207,7 @@ class AgentClient extends BaseClient {
       const toolSet = buildToolSet(this.options.agent);
       const tokenCounter = createTokenCounter(this.getEncoding());
 
-      this.openAIContainer = await prepareOpenAIContainer(this.options.agent, {
+      this.openAIContainer = await prepareOpenAIContainer(responseAgent, {
         userId: this.options.req.user.id,
         tenantId: this.options.req.user.tenantId,
         conversationId: this.conversationId,
@@ -1203,6 +1217,60 @@ class AgentClient extends BaseClient {
         user: createSafeUser(this.options.req.user),
         claim: db.claimOpenAIContainer,
         signal: abortController.signal,
+        ensureExplicit:
+          !!this.options.openAIResources &&
+          ((this.options.agent.accessibleSkillIds?.length ?? 0) > 0 ||
+            collectRestorableFileIds(this.currentMessages ?? [], this.conversationId).length > 0),
+      });
+
+      const nativeResourceInstructions = await this.options.openAIResources?.prepare({
+        container: this.openAIContainer,
+        agent: responseAgent,
+        conversationId: this.conversationId,
+        history: this.currentMessages ?? [],
+        payload,
+        signal: abortController.signal,
+      });
+      if (nativeResourceInstructions) {
+        this.openAIContainer.agent.additional_instructions = [
+          this.openAIContainer.agent.additional_instructions,
+          nativeResourceInstructions,
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+      }
+
+      const preparedAgents = await prepareOpenAIWorkspaces({
+        agents: [responseAgent, ...(this.agentConfigs?.values() ?? [])],
+        prepared: new Map([[responseAgent.id, this.openAIContainer.agent]]),
+        prepare: async (agent) => {
+          const container = await prepareOpenAIContainer(agent, {
+            userId: this.options.req.user.id,
+            tenantId: this.options.req.user.tenantId,
+            conversationId: this.conversationId,
+            messageId: this.responseMessageId,
+            user: createSafeUser(this.options.req.user),
+            history: [],
+            claim: db.claimOpenAIContainer,
+            signal: abortController.signal,
+            ensureExplicit:
+              !!this.options.openAIResources && (agent.accessibleSkillIds?.length ?? 0) > 0,
+          });
+          const instructions = await this.options.openAIResources?.prepare({
+            container,
+            agent,
+            conversationId: this.conversationId,
+            history: [],
+            payload: [],
+            signal: abortController.signal,
+          });
+          return {
+            ...container.agent,
+            additional_instructions: [container.agent.additional_instructions, instructions]
+              .filter(Boolean)
+              .join('\n\n'),
+          };
+        },
       });
 
       /** Pre-resolve invoked skill bodies + re-prime files before formatting messages */
@@ -1349,23 +1417,12 @@ class AgentClient extends BaseClient {
        * @param {BaseMessage[]} messages
        */
       const runAgents = async (messages) => {
-        const primaryAgent = this.openAIContainer.agent;
-        const agents = [
-          this.options.responseProgress
-            ? withResponseProgress(
-                primaryAgent,
-                this.options.responseProgress,
-                this.responseMessageId,
-                abortController.signal,
-              )
-            : primaryAgent,
-        ];
+        const [primaryAgent, ...additionalAgents] = preparedAgents;
+        const agents = [primaryAgent];
         // Include additional agents when:
         // - agentConfigs has agents (from addedConvo parallel execution or agent handoffs)
         // - Agents without incoming edges become start nodes and run in parallel automatically
-        if (this.agentConfigs && this.agentConfigs.size > 0) {
-          agents.push(...this.agentConfigs.values());
-        }
+        agents.push(...additionalAgents);
 
         // TODO: needs to be added as part of AgentContext initialization
         // const noSystemModelRegex = [/\b(o1-preview|o1-mini|amazon\.titan-text)\b/gi];

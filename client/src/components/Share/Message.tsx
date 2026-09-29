@@ -79,6 +79,7 @@ export default function Message(props: TMessageProps) {
                       conversationId: conversation?.conversationId,
                       isSubmitting: false, // Share view is always read-only
                       isLatestMessage: false, // No concept of latest message in share view
+                      attachments,
                     }}
                   >
                     {message.content ? (

@@ -1,7 +1,9 @@
+import { createHmac } from 'node:crypto';
 import { GraphEvents, Providers, StandardGraph, initializeModel } from '@librechat/agents';
 import { AIMessage, HumanMessage } from '@librechat/agents/langchain/messages';
 import type { OpenAIClientOptions } from '@librechat/agents';
 import { prepareOpenAIContainer } from './container';
+import { resolveConfigHeaders } from '~/utils/headers';
 
 const clock = 1_800_000_000_000;
 const scope = {
@@ -35,8 +37,31 @@ const response = {
   usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
 };
 
-function setup({ status = 'running', httpStatus = 200, streaming = false } = {}) {
-  const fetch = jest.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+interface SetupOptions {
+  status?: string;
+  httpStatus?: number;
+  streaming?: boolean;
+  container?: {
+    type: 'auto';
+    memory_limit?: '1g' | '4g' | '16g' | '64g';
+    file_ids?: string[];
+    [key: string]: unknown;
+  };
+}
+
+function setup({
+  status = 'running',
+  httpStatus = 200,
+  streaming = false,
+  container = { type: 'auto' },
+}: SetupOptions = {}) {
+  const fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).endsWith('/containers') && init?.method?.toUpperCase() === 'POST') {
+      return new Response(
+        JSON.stringify({ id: 'cntr_explicit', status: 'active', name: 'librechat-conversation-1' }),
+        { headers: { 'content-type': 'application/json' } },
+      );
+    }
     if (String(url).includes('/containers/')) {
       return new Response(
         JSON.stringify(
@@ -77,7 +102,7 @@ function setup({ status = 'running', httpStatus = 200, streaming = false } = {})
     provider: Providers.OPENAI,
     additional_instructions: '',
     model_parameters: options,
-    tools: [{ type: 'code_interpreter', container: { type: 'auto' } }, { type: 'web_search' }],
+    tools: [{ type: 'code_interpreter', container }, { type: 'web_search' }],
   };
   const graph = new StandardGraph({
     agents: [{ agentId: agent.id, provider: Providers.OPENAI, clientOptions: options }],
@@ -119,6 +144,62 @@ function setup({ status = 'running', httpStatus = 200, streaming = false } = {})
 }
 
 describe('OpenAI container reuse', () => {
+  it('creates and exposes an explicit container when files must be staged', async () => {
+    const s = setup({
+      container: {
+        type: 'auto',
+        memory_limit: '16g',
+        file_ids: ['file_input_1', 'file_input_2'],
+        unsupported_option: 'ignored',
+      },
+    });
+    const session = await prepareOpenAIContainer(s.agent, {
+      ...s.params,
+      ensureExplicit: true,
+    });
+
+    expect(session.id()).toBe('cntr_explicit');
+    expect(session.client()).toBeDefined();
+    expect(session.snapshot()?.id).toBe('cntr_explicit');
+    expect(session.agent.tools[0]).toEqual({
+      type: 'code_interpreter',
+      container: 'cntr_explicit',
+    });
+    expect(s.fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(s.fetch.mock.calls[0][1]?.body))).toEqual({
+      name: 'librechat-conversation-1',
+      memory_limit: '16g',
+      file_ids: ['file_input_1', 'file_input_2'],
+    });
+  });
+
+  it('keeps the explicit create payload minimal when auto has no options', async () => {
+    const s = setup();
+    await prepareOpenAIContainer(s.agent, { ...s.params, ensureExplicit: true });
+
+    expect(JSON.parse(String(s.fetch.mock.calls[0][1]?.body))).toEqual({
+      name: 'librechat-conversation-1',
+    });
+  });
+
+  it('exposes the verified prior container without creating another one', async () => {
+    const s = setup({
+      container: { type: 'auto', memory_limit: '4g', file_ids: ['file_existing'] },
+    });
+    const session = await prepareOpenAIContainer(s.agent, {
+      ...s.params,
+      history: await s.history(),
+      messageId: 'reply-2',
+      ensureExplicit: true,
+    });
+
+    expect(session.id()).toBe('cntr_test');
+    expect(session.client()).toBeDefined();
+    expect(s.fetch).toHaveBeenCalledTimes(1);
+    expect(String(s.fetch.mock.calls[0][0])).toContain('/containers/cntr_test');
+    expect(s.fetch.mock.calls[0][1]?.method).toBe('GET');
+  });
+
   it.each([false, true])(
     'captures and reuses a container through the SDK, streaming=%s',
     async (streaming) => {
@@ -184,7 +265,94 @@ describe('OpenAI container reuse', () => {
       const pending = prepareOpenAIContainer(s.agent, { ...s.params, history: await s.history() });
       if (httpStatus === 404) expect((await pending).snapshot()).toBeUndefined();
       else await expect(pending).rejects.toMatchObject({ status: httpStatus });
+      expect(s.claim).not.toHaveBeenCalled();
     }
+  });
+
+  it.each([429, 500])(
+    'does not consume the continuation on a transient %s preflight failure',
+    async (httpStatus) => {
+      const s = setup();
+      const history = await s.history();
+      s.fetch.mockImplementationOnce(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: { message: 'Container temporarily unavailable', type: 'server_error' },
+            }),
+            { status: httpStatus, headers: { 'content-type': 'application/json' } },
+          ),
+      );
+
+      await expect(
+        prepareOpenAIContainer(s.agent, {
+          ...s.params,
+          history,
+          messageId: 'reply-2',
+        }),
+      ).rejects.toMatchObject({ status: httpStatus });
+      expect(s.claim).not.toHaveBeenCalled();
+
+      const retry = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        history,
+        messageId: 'reply-2-retry',
+      });
+      expect(retry.snapshot()?.id).toBe('cntr_test');
+      expect(s.claim).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not consume the continuation on a transport timeout', async () => {
+    const s = setup();
+    const history = await s.history();
+    s.fetch.mockImplementationOnce(async () => {
+      throw new DOMException('The operation timed out', 'TimeoutError');
+    });
+
+    await expect(
+      prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        history,
+        messageId: 'reply-2',
+      }),
+    ).rejects.toThrow('Connection error');
+    expect(s.claim).not.toHaveBeenCalled();
+
+    const retry = await prepareOpenAIContainer(s.agent, {
+      ...s.params,
+      history,
+      messageId: 'reply-2-retry',
+    });
+    expect(retry.snapshot()?.id).toBe('cntr_test');
+  });
+
+  it('does not claim an active container when the request is aborted during preflight', async () => {
+    const s = setup();
+    const history = await s.history();
+    const controller = new AbortController();
+    s.fetch.mockImplementationOnce(async () => {
+      controller.abort();
+      return new Response(JSON.stringify({ id: 'cntr_test', status: 'running' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    await prepareOpenAIContainer(s.agent, {
+      ...s.params,
+      history,
+      messageId: 'reply-2',
+      signal: controller.signal,
+    }).catch(() => undefined);
+    expect(s.claim).not.toHaveBeenCalled();
+
+    const retry = await prepareOpenAIContainer(s.agent, {
+      ...s.params,
+      history,
+      messageId: 'reply-2-retry',
+      signal: new AbortController().signal,
+    });
+    expect(retry.snapshot()?.id).toBe('cntr_test');
   });
 
   it('starts fresh after twenty minutes or several days without requesting the old container', async () => {
@@ -243,7 +411,7 @@ describe('OpenAI container reuse', () => {
     expect(s.claim).not.toHaveBeenCalled();
   });
 
-  it('does not reuse a session after credentials, endpoint or project change', async () => {
+  it('does not reuse after credentials, endpoint, project or static headers change', async () => {
     const s = setup();
     const history = await s.history();
     for (const options of [
@@ -253,6 +421,13 @@ describe('OpenAI container reuse', () => {
         configuration: { ...s.options.configuration, baseURL: 'https://other.example/v1' },
       },
       { ...s.options, configuration: { ...s.options.configuration, project: 'another-project' } },
+      {
+        ...s.options,
+        configuration: {
+          ...s.options.configuration,
+          defaultHeaders: { 'X-Gateway': 'another-gateway-secret' },
+        },
+      },
     ]) {
       const session = await prepareOpenAIContainer(
         { ...s.agent, model_parameters: options },
@@ -277,6 +452,199 @@ describe('OpenAI container reuse', () => {
       'X-User': '{{LIBRECHAT_USER_ID}}',
       'X-Conversation': '{{LIBRECHAT_BODY_CONVERSATIONID}}',
     });
+  });
+
+  it('keeps turn-specific gateway headers out of the stable scope and sends their current values', async () => {
+    const previousSecret = process.env.CONTAINER_SCOPE_SECRET;
+    process.env.CONTAINER_SCOPE_SECRET = 'admin-secret';
+    try {
+      const s = setup();
+      s.options.configuration!.defaultHeaders = {
+        'X-Message': '{{LIBRECHAT_BODY_MESSAGEID}}',
+        'X-Parent': '{{LIBRECHAT_BODY_PARENTMESSAGEID}}',
+        'X-Conversation': '{{LIBRECHAT_BODY_CONVERSATIONID}}',
+        'X-User': '{{LIBRECHAT_USER_ID}}',
+        'X-Environment': '${CONTAINER_SCOPE_SECRET}',
+        'X-User-Value': '{{LIBRECHAT_USER_NAME}}',
+      };
+      const user = { id: scope.userId, name: '${CONTAINER_SCOPE_SECRET}' };
+      const first = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        parentMessageId: 'user-1',
+        user,
+      });
+      await s.capture(first);
+
+      const second = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        messageId: 'reply-2',
+        parentMessageId: 'user-2',
+        user,
+        history: [
+          {
+            ...scope,
+            isCreatedByUser: false,
+            metadata: { openAIContainer: first.snapshot() },
+          },
+        ],
+      });
+      expect(second.snapshot()?.id).toBe('cntr_test');
+
+      const preflightHeaders = new Headers(s.fetch.mock.calls[0][1]?.headers);
+      expect(preflightHeaders.get('X-Message')).toBe('reply-2');
+      expect(preflightHeaders.get('X-Parent')).toBe('user-2');
+      expect(preflightHeaders.get('X-Conversation')).toBe(scope.conversationId);
+      expect(preflightHeaders.get('X-User')).toBe(scope.userId);
+      expect(preflightHeaders.get('X-Environment')).toBe('admin-secret');
+      expect(preflightHeaders.get('X-User-Value')).toBe('${CONTAINER_SCOPE_SECRET}');
+
+      const model = initializeModel({
+        provider: Providers.OPENAI,
+        tools: second.agent.tools,
+        clientOptions: second.agent.model_parameters,
+      });
+      await model.invoke([new HumanMessage('Continue with the current turn headers.')]);
+      const generationHeaders = new Headers(
+        s.fetch.mock.calls[s.fetch.mock.calls.length - 1][1]?.headers,
+      );
+      expect(generationHeaders.get('X-Message')).toBe('reply-2');
+      expect(generationHeaders.get('X-Parent')).toBe('user-2');
+      expect(generationHeaders.get('X-User-Value')).toBe('${CONTAINER_SCOPE_SECRET}');
+      expect(s.options.configuration?.defaultHeaders?.['X-Message']).toBe(
+        '{{LIBRECHAT_BODY_MESSAGEID}}',
+      );
+    } finally {
+      if (previousSecret === undefined) delete process.env.CONTAINER_SCOPE_SECRET;
+      else process.env.CONTAINER_SCOPE_SECRET = previousSecret;
+    }
+  });
+
+  it('keeps resolved user and environment header values in the signed scope', async () => {
+    const previousSecret = process.env.CONTAINER_SCOPE_SECRET;
+    process.env.CONTAINER_SCOPE_SECRET = 'first-secret';
+    try {
+      const s = setup();
+      s.options.configuration!.defaultHeaders = {
+        'X-Environment': '${CONTAINER_SCOPE_SECRET}',
+        'X-User': '{{LIBRECHAT_USER_NAME}}',
+      };
+      const first = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        user: { id: scope.userId, name: 'Alice' },
+      });
+      await s.capture(first);
+      const history = [
+        {
+          ...scope,
+          isCreatedByUser: false,
+          metadata: { openAIContainer: first.snapshot() },
+        },
+      ];
+
+      const changedUser = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        messageId: 'reply-2',
+        user: { id: scope.userId, name: 'Bob' },
+        history,
+      });
+      expect(changedUser.snapshot()).toBeUndefined();
+
+      process.env.CONTAINER_SCOPE_SECRET = 'second-secret';
+      const changedEnvironment = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        messageId: 'reply-3',
+        user: { id: scope.userId, name: 'Alice' },
+        history,
+      });
+      expect(changedEnvironment.snapshot()).toBeUndefined();
+      expect(s.claim).not.toHaveBeenCalled();
+      expect(s.fetch).not.toHaveBeenCalled();
+    } finally {
+      if (previousSecret === undefined) delete process.env.CONTAINER_SCOPE_SECRET;
+      else process.env.CONTAINER_SCOPE_SECRET = previousSecret;
+    }
+  });
+
+  it('preserves compatibility with sessions signed before stable turn headers', async () => {
+    const s = setup();
+    const config = s.options.configuration;
+    const legacyScope = JSON.stringify([
+      scope.userId,
+      scope.tenantId,
+      scope.conversationId,
+      s.agent.id,
+      s.agent.provider,
+      config?.baseURL,
+      config?.organization,
+      config?.project,
+      Object.entries(config?.defaultHeaders ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+      config?.defaultQuery,
+      { type: 'auto' },
+    ]);
+    const prior = {
+      id: 'cntr_test',
+      updatedAt: clock,
+      signature: createHmac('sha256', s.options.apiKey as string)
+        .update(JSON.stringify([legacyScope, scope.messageId, 'cntr_test', clock]))
+        .digest('hex'),
+    };
+
+    const session = await prepareOpenAIContainer(s.agent, {
+      ...s.params,
+      messageId: 'reply-2',
+      history: [
+        {
+          ...scope,
+          isCreatedByUser: false,
+          metadata: { openAIContainer: prior },
+        },
+      ],
+    });
+    expect(session.snapshot()?.id).toBe('cntr_test');
+  });
+
+  it('does not expand user-derived values again when headers were already resolved', async () => {
+    const previousSecret = process.env.CONTAINER_SCOPE_SECRET;
+    process.env.CONTAINER_SCOPE_SECRET = 'must-not-leak';
+    try {
+      const s = setup();
+      s.options.configuration!.defaultHeaders = {
+        'X-User-Value': '{{LIBRECHAT_USER_NAME}}',
+      };
+      const user = { id: scope.userId, name: '${CONTAINER_SCOPE_SECRET}' };
+      resolveConfigHeaders({
+        llmConfig: s.options as Parameters<typeof resolveConfigHeaders>[0]['llmConfig'],
+        user,
+        body: scope,
+      });
+
+      const first = await prepareOpenAIContainer(s.agent, { ...s.params, user });
+      const resolvedHeaders = new Headers(
+        (first.agent.model_parameters as OpenAIClientOptions).configuration
+          ?.defaultHeaders as HeadersInit,
+      );
+      expect(resolvedHeaders.get('X-User-Value')).toBe('${CONTAINER_SCOPE_SECRET}');
+      await s.capture(first);
+
+      const second = await prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        user,
+        messageId: 'reply-2',
+        history: [
+          {
+            ...scope,
+            isCreatedByUser: false,
+            metadata: { openAIContainer: first.snapshot() },
+          },
+        ],
+      });
+      expect(second.snapshot()?.id).toBe('cntr_test');
+      const headers = new Headers(s.fetch.mock.calls[0][1]?.headers);
+      expect(headers.get('X-User-Value')).toBe('${CONTAINER_SCOPE_SECRET}');
+    } finally {
+      if (previousSecret === undefined) delete process.env.CONTAINER_SCOPE_SECRET;
+      else process.env.CONTAINER_SCOPE_SECRET = previousSecret;
+    }
   });
 
   it('does not claim or query a container when the request was already cancelled', async () => {
@@ -314,7 +682,39 @@ describe('OpenAI container reuse', () => {
     });
     expect(session.agent.tools).toEqual(s.agent.tools);
     expect(session.agent.additional_instructions).toContain('starts empty');
-    expect(s.fetch).not.toHaveBeenCalled();
+    expect(s.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('preflights concurrent continuations before atomically allowing only one claim', async () => {
+    const s = setup();
+    const history = await s.history();
+    let claimed = false;
+    s.claim.mockImplementation(async () => {
+      if (claimed) return false;
+      claimed = true;
+      return true;
+    });
+    s.fetch.mockClear();
+
+    const sessions = await Promise.all([
+      prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        history,
+        messageId: 'reply-2a',
+      }),
+      prepareOpenAIContainer(s.agent, {
+        ...s.params,
+        history,
+        messageId: 'reply-2b',
+      }),
+    ]);
+
+    expect(s.fetch).toHaveBeenCalledTimes(2);
+    expect(s.claim).toHaveBeenCalledTimes(2);
+    expect(sessions.filter((session) => session.snapshot()?.id === 'cntr_test')).toHaveLength(1);
+    expect(
+      sessions.filter((session) => session.agent.additional_instructions?.includes('starts empty')),
+    ).toHaveLength(1);
   });
 
   it('carries the session forward through a text-only reply and ignores child-agent output', async () => {

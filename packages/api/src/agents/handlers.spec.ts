@@ -1,5 +1,6 @@
 import { Constants } from '@librechat/agents';
 import { logger } from '@librechat/data-schemas';
+import { Types } from 'mongoose';
 import type {
   ToolExecuteBatchRequest,
   ToolExecuteResult,
@@ -82,6 +83,118 @@ function skillsInScope(): unknown[] {
 }
 
 describe('createToolExecuteHandler', () => {
+  describe('native OpenAI skill preparation', () => {
+    const skill = {
+      _id: new Types.ObjectId(),
+      name: 'office',
+      body: 'Create a document using the supplied resources.',
+      version: 1,
+      fileCount: 1,
+    };
+
+    async function invokeNative(
+      primeOpenAISkill: NonNullable<ToolExecuteOptions['primeOpenAISkill']>,
+      disableModelInvocation = false,
+    ) {
+      const handler = createToolExecuteHandler({
+        loadTools: async () => ({
+          loadedTools: [],
+          configurable: { accessibleSkillIds: [skill._id] },
+        }),
+        getSkillByName: async () => ({ ...skill, disableModelInvocation }),
+        primeOpenAISkill,
+      });
+      return new Promise<ToolExecuteResult[]>((resolve, reject) => {
+        handler.handle('on_tool_execute', {
+          agentId: 'primary',
+          toolCalls: [
+            { id: 'native-skill', name: Constants.SKILL_TOOL, args: { skillName: 'office' } },
+          ],
+          resolve,
+          reject,
+        } satisfies ToolExecuteBatchRequest);
+      });
+    }
+
+    it('waits for the upload before injecting the resource paths into the skill', async () => {
+      let release: (instructions: string) => void = () => undefined;
+      const pending = new Promise<string>((resolve) => {
+        release = resolve;
+      });
+      const prime = jest.fn(() => pending);
+      let finished = false;
+      const invocation = invokeNative(prime).then((results) => {
+        finished = true;
+        return results;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(finished).toBe(false);
+      expect(prime).toHaveBeenCalledWith(expect.objectContaining(skill), 'primary');
+      release('Resources uploaded: /mnt/data/actual-office.zip');
+      const [result] = await invocation;
+      expect(result.status).toBe('success');
+      expect(JSON.stringify(result.injectedMessages)).toContain('/mnt/data/actual-office.zip');
+    });
+
+    it('reports a failed upload instead of injecting an unusable skill', async () => {
+      const [result] = await invokeNative(async () => {
+        throw new Error('Resource upload failed');
+      });
+      expect(result.status).toBe('error');
+      expect(result.errorMessage).toContain('Resource upload failed');
+      expect(result.injectedMessages).toBeUndefined();
+    });
+
+    it('does not upload resources of a model-disabled skill', async () => {
+      const prime = jest.fn(async () => 'uploaded');
+      const [result] = await invokeNative(prime, true);
+      expect(result.status).toBe('error');
+      expect(prime).not.toHaveBeenCalled();
+    });
+
+    it.each(['image/png', 'text/plain'])(
+      'returns verified native resource paths for an oversized %s read',
+      async (mimeType) => {
+        const prime = jest.fn(
+          async () => 'Verified root: /mnt/data/.librechat/bundles/hash/skills/office',
+        );
+        const handler = createToolExecuteHandler({
+          loadTools: async () => ({
+            loadedTools: [],
+            configurable: { accessibleSkillIds: [skill._id] },
+          }),
+          getSkillByName: async () => skill,
+          getSkillFileByPath: async () => ({
+            mimeType,
+            bytes: 12 * 1024 * 1024,
+            relativePath: 'large-resource',
+            filepath: '/stored/large-resource',
+            source: 'local',
+          }),
+          primeOpenAISkill: prime,
+        });
+        const [result] = await new Promise<ToolExecuteResult[]>((resolve, reject) => {
+          handler.handle('on_tool_execute', {
+            agentId: 'primary',
+            toolCalls: [
+              {
+                id: 'native-read',
+                name: Constants.READ_FILE,
+                args: { path: 'skills/office/large-resource' },
+              },
+            ],
+            resolve,
+            reject,
+          } satisfies ToolExecuteBatchRequest);
+        });
+        expect(result.status).toBe('success');
+        expect(result.content).toContain('/mnt/data/.librechat/bundles/hash/skills/office');
+        expect(result.content).not.toContain('Use bash');
+        expect(prime).toHaveBeenCalledWith(skill, 'primary');
+      },
+    );
+  });
+
   describe('code execution session context passthrough', () => {
     it('passes session_id and _injected_files from codeSessionContext to toolCallConfig', async () => {
       const capturedConfigs: Record<string, unknown>[] = [];

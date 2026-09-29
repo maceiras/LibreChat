@@ -7,7 +7,7 @@ import { cn, getHeaderPrefixForScreenReader, getMessageAriaLabel } from '~/utils
 import MessageContent from '~/components/Chat/Messages/Content/MessageContent';
 import MessageTimestamp from '~/components/Chat/Messages/ui/MessageTimestamp';
 import ResponseProgress from '~/components/Chat/Messages/ui/ResponseProgress';
-import { useLocalize, useMessageActions, useContentMetadata } from '~/hooks';
+import { useAttachments, useLocalize, useMessageActions, useContentMetadata } from '~/hooks';
 import PlaceholderRow from '~/components/Chat/Messages/ui/PlaceholderRow';
 import SiblingSwitch from '~/components/Chat/Messages/SiblingSwitch';
 import HoverButtons from '~/components/Chat/Messages/HoverButtons';
@@ -100,6 +100,10 @@ const MessageRender = memo(function MessageRender({
   chatContext,
 }: MessageRenderProps) {
   const localize = useLocalize();
+  const { attachments } = useAttachments({
+    messageId: msg?.messageId,
+    attachments: msg?.attachments,
+  });
   const {
     ask,
     edit,
@@ -160,8 +164,9 @@ const MessageRender = memo(function MessageRender({
       isExpanded: false as const,
       isSubmitting,
       conversationId: conversation?.conversationId,
+      attachments,
     }),
-    [messageId, conversation?.conversationId, isSubmitting, isLatestMessage],
+    [messageId, conversation?.conversationId, isSubmitting, isLatestMessage, attachments],
   );
 
   if (!msg) {

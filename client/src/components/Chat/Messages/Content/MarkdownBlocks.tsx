@@ -4,6 +4,7 @@ import type { PluggableList } from 'unified';
 import type { ElementType } from 'react';
 import { ArtifactProvider, CodeBlockProvider } from '~/Providers';
 import { splitMarkdownIntoBlocks } from './splitMarkdown';
+import { markdownUrlTransform } from './links';
 
 type SharedProps = {
   remarkPlugins: PluggableList;
@@ -37,6 +38,7 @@ const MarkdownBlock = memo(
       <ArtifactProvider baseIndex={artifactBaseIndex}>
         <CodeBlockProvider baseIndex={codeBaseIndex}>
           <ReactMarkdown
+            urlTransform={markdownUrlTransform}
             /** @ts-ignore */
             remarkPlugins={remarkPlugins}
             /** @ts-ignore */

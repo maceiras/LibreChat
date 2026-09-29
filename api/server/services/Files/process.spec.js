@@ -1,20 +1,33 @@
+const fs = require('fs/promises');
+const os = require('os');
+const path = require('path');
+const JSZip = require('jszip');
+
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'mock-uuid') }));
 
-jest.mock('@librechat/data-schemas', () => ({
-  logger: { warn: jest.fn(), debug: jest.fn(), error: jest.fn(), info: jest.fn() },
-  runAsSystem: jest.fn((fn) => fn()),
-  createTempChatExpirationDate: jest.fn(() => new Date('2030-01-01T00:00:00.000Z')),
-}));
+jest.mock('@librechat/data-schemas', () => {
+  const actual = jest.requireActual('@librechat/data-schemas');
+  return {
+    ...actual,
+    logger: { warn: jest.fn(), debug: jest.fn(), error: jest.fn(), info: jest.fn() },
+    runAsSystem: jest.fn((fn) => fn()),
+    createTempChatExpirationDate: jest.fn(() => new Date('2030-01-01T00:00:00.000Z')),
+  };
+});
 
-jest.mock('@librechat/agents', () => ({
-  Providers: {
-    XAI: 'xai',
-    DEEPSEEK: 'deepseek',
-    MOONSHOT: 'moonshot',
-    OPENROUTER: 'openrouter',
-    VERTEXAI: 'vertexai',
-  },
-}));
+jest.mock('@librechat/agents', () => {
+  const actual = jest.requireActual('@librechat/agents');
+  return {
+    ...actual,
+    Providers: {
+      XAI: 'xai',
+      DEEPSEEK: 'deepseek',
+      MOONSHOT: 'moonshot',
+      OPENROUTER: 'openrouter',
+      VERTEXAI: 'vertexai',
+    },
+  };
+});
 
 jest.mock('librechat-data-provider', () => {
   const actual = jest.requireActual('librechat-data-provider');
@@ -238,11 +251,11 @@ const mockRes = {
   json: jest.fn().mockReturnValue({}),
 };
 
-const makeFileConfig = ({ ocrSupportedMimeTypes = [] } = {}) => ({
+const makeFileConfig = ({ ocrSupportedMimeTypes = [], textSupportedMimeTypes = [] } = {}) => ({
   checkType: (mime, types) => (types ?? []).includes(mime),
   ocr: { supportedMimeTypes: ocrSupportedMimeTypes },
   stt: { supportedMimeTypes: [] },
-  text: { supportedMimeTypes: [] },
+  text: { supportedMimeTypes: textSupportedMimeTypes },
 });
 
 const setupStoredFileUpload = (result = {}) => {
@@ -476,6 +489,135 @@ describe('processAgentFileUpload', () => {
       await expect(
         processAgentFileUpload({ req, res: mockRes, metadata: makeMetadata() }),
       ).resolves.not.toThrow();
+    });
+  });
+
+  describe('native text fallback', () => {
+    const actualParseText = jest.requireActual('@librechat/api').parseText;
+    const { parseText } = require('@librechat/api');
+    const originalRagApiUrl = process.env.RAG_API_URL;
+    let tempDirectory;
+    let presentationPath;
+    let archivePath;
+    let textPath;
+
+    beforeAll(async () => {
+      tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'librechat-text-upload-'));
+      presentationPath = path.join(tempDirectory, 'presentation.pptx');
+      archivePath = path.join(tempDirectory, 'archive.zip');
+      textPath = path.join(tempDirectory, 'notes.txt');
+
+      const presentation = new JSZip();
+      presentation.file(
+        '[Content_Types].xml',
+        '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>',
+      );
+      presentation.file(
+        '_rels/.rels',
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>',
+      );
+      presentation.file(
+        'ppt/presentation.xml',
+        '<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
+      );
+      presentation.file(
+        'ppt/_rels/presentation.xml.rels',
+        '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>',
+      );
+      presentation.file(
+        'ppt/slides/slide1.xml',
+        '<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree/></p:cSld></p:sld>',
+      );
+
+      const archive = new JSZip();
+      archive.file('notes.txt', 'This text is inside a ZIP archive.');
+
+      await Promise.all([
+        fs.writeFile(presentationPath, await presentation.generateAsync({ type: 'nodebuffer' })),
+        fs.writeFile(archivePath, await archive.generateAsync({ type: 'nodebuffer' })),
+        fs.writeFile(textPath, 'Readable UTF-8 text.\nDeuxième ligne.'),
+      ]);
+    });
+
+    afterAll(async () => {
+      await fs.rm(tempDirectory, { recursive: true, force: true });
+    });
+
+    beforeEach(() => {
+      delete process.env.RAG_API_URL;
+      parseText.mockImplementation(actualParseText);
+    });
+
+    afterEach(() => {
+      parseText.mockReset();
+      parseText.mockResolvedValue({ text: '', bytes: 0 });
+      if (originalRagApiUrl == null) {
+        delete process.env.RAG_API_URL;
+      } else {
+        process.env.RAG_API_URL = originalRagApiUrl;
+      }
+    });
+
+    test.each([
+      ['a PowerPoint upload reported as ZIP', 'presentation.pptx', () => presentationPath],
+      ['a ZIP archive', 'archive.zip', () => archivePath],
+    ])('rejects %s without persisting a successful upload', async (_, originalname, getPath) => {
+      const filePath = getPath();
+      const { size } = await fs.stat(filePath);
+      const req = makeReq({ mimetype: 'application/zip', ocrConfig: null });
+      req.file = {
+        ...req.file,
+        path: filePath,
+        size,
+        originalname,
+        filename: originalname,
+      };
+      mergeFileConfig.mockReturnValue(
+        makeFileConfig({ textSupportedMimeTypes: ['application/zip'] }),
+      );
+
+      await expect(
+        processAgentFileUpload({ req, res: mockRes, metadata: makeMetadata() }),
+      ).rejects.toThrow(
+        `Unable to extract text from "${originalname}". No compatible text extractor succeeded for this file.`,
+      );
+
+      expect(parseText).toHaveBeenCalledTimes(1);
+      expect(db.addAgentResourceFile).not.toHaveBeenCalled();
+      expect(db.createFile).not.toHaveBeenCalled();
+      expect(mockRes.status).not.toHaveBeenCalled();
+      expect(mockRes.json).not.toHaveBeenCalled();
+    });
+
+    test('persists valid UTF-8 text after native parsing', async () => {
+      const { size } = await fs.stat(textPath);
+      const req = makeReq({ mimetype: 'text/plain', ocrConfig: null });
+      req.file = {
+        ...req.file,
+        path: textPath,
+        size,
+        originalname: 'notes.txt',
+        filename: 'notes.txt',
+      };
+      mergeFileConfig.mockReturnValue(makeFileConfig({ textSupportedMimeTypes: ['text/plain'] }));
+
+      await processAgentFileUpload({ req, res: mockRes, metadata: makeMetadata() });
+
+      expect(parseText).toHaveBeenCalledTimes(1);
+      expect(db.createFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'Readable UTF-8 text.\nDeuxième ligne.',
+          bytes: size,
+          filename: 'notes.txt',
+          source: FileSources.text,
+          type: 'text/plain',
+        }),
+        true,
+      );
+      expect(mockRes.status).toHaveBeenCalledWith(200);
+      expect(mockRes.json).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Agent file uploaded and processed successfully' }),
+      );
     });
   });
 

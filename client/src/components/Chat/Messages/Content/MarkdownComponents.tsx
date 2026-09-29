@@ -6,8 +6,10 @@ import Mermaid, { MermaidErrorBoundary } from '~/components/Messages/Content/Mer
 import CodeBlock from '~/components/Messages/Content/CodeBlock';
 import useHasAccess from '~/hooks/Roles/useHasAccess';
 import { useFileDownload } from '~/data-provider';
-import { useCodeBlockContext } from '~/Providers';
+import { useCodeBlockContext, useMessageContext } from '~/Providers';
 import { handleDoubleClick, triggerDownload } from '~/utils';
+import LogLink from './Parts/LogLink';
+import { getSandboxArtifactPath, resolveSandboxAttachment } from './links';
 import { useLocalize } from '~/hooks';
 import store from '~/store';
 
@@ -105,7 +107,7 @@ type TAnchorProps = {
   children: React.ReactNode;
 };
 
-export const a: React.ElementType = memo(function MarkdownAnchor({ href, children }: TAnchorProps) {
+const RegularMarkdownAnchor = ({ href, children }: TAnchorProps) => {
   const user = useRecoilValue(store.user);
   const { showToast } = useToastContext();
   const localize = useLocalize();
@@ -172,6 +174,36 @@ export const a: React.ElementType = memo(function MarkdownAnchor({ href, childre
     >
       {children}
     </a>
+  );
+};
+
+export const a: React.ElementType = memo(function MarkdownAnchor({ href, children }: TAnchorProps) {
+  const { attachments } = useMessageContext();
+  const isSandboxLink = href.startsWith('sandbox:');
+  const sandboxPath = getSandboxArtifactPath(href);
+  const attachment = useMemo(
+    () => resolveSandboxAttachment(href, attachments),
+    [attachments, href],
+  );
+
+  if (!isSandboxLink) {
+    return <RegularMarkdownAnchor href={href}>{children}</RegularMarkdownAnchor>;
+  }
+
+  if (!sandboxPath || !attachment?.filepath || !attachment.filename) {
+    return <span aria-disabled="true">{children}</span>;
+  }
+
+  return (
+    <LogLink
+      href={attachment.filepath}
+      filename={attachment.filename}
+      file_id={'file_id' in attachment ? attachment.file_id : undefined}
+      user={'user' in attachment ? attachment.user : undefined}
+      source={'source' in attachment ? attachment.source : undefined}
+    >
+      {children}
+    </LogLink>
   );
 });
 a.displayName = 'MarkdownAnchor';

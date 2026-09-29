@@ -687,9 +687,32 @@ describe('isStreamWritable', () => {
 });
 
 describe('OpenAI Responses output attachments', () => {
-  it.each([null, 'resumable-job'])(
-    'persists and emits downloaded outputs (streamId=%s)',
-    async (streamId) => {
+  const cases = [null, 'resumable-job'].flatMap((streamId) => [
+    { streamId, label: 'default visibility', visibility: {}, visible: true },
+    {
+      streamId,
+      label: 'hidden intermediate agent',
+      visibility: { last_agent_id: 'final-agent', hide_sequential_outputs: true },
+      visible: false,
+    },
+    {
+      streamId,
+      label: 'visible final agent',
+      visibility: { last_agent_id: 'native', hide_sequential_outputs: true },
+      visible: true,
+    },
+    {
+      streamId,
+      label: 'visible intermediate agent',
+      visibility: { last_agent_id: 'final-agent', hide_sequential_outputs: false },
+      visible: true,
+    },
+  ]);
+
+  it.each(cases)(
+    'preserves attachment visibility and usage for $label (streamId=$streamId)',
+    async ({ streamId, visibility, visible }) => {
+      jest.clearAllMocks();
       const { StandardGraph, GraphEvents, Providers } = require('@librechat/agents');
       const { AIMessageChunk } = require('@librechat/agents/langchain/messages');
       const { getDefaultHandlers } = require('../callbacks');
@@ -698,12 +721,13 @@ describe('OpenAI Responses output attachments', () => {
       const req = { user: { id: '507f1f77bcf86cd799439011' }, config: { fileStrategy: 'local' } };
       const res = { headersSent: true, writableEnded: false, write: jest.fn() };
       const artifactPromises = [];
+      const collectedUsage = [];
       const createFile = jest.fn(async (file) => file);
       const handlers = getDefaultHandlers({
         res,
         streamId,
         artifactPromises,
-        collectedUsage: [],
+        collectedUsage,
         aggregateContent: jest.fn(),
         openAIFileOptions: {
           req,
@@ -722,10 +746,11 @@ describe('OpenAI Responses output attachments', () => {
         ],
       });
       const output = new AIMessageChunk({
+        usage_metadata: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
         content: [
           {
             type: 'text',
-            text: 'Report created.',
+            text: '[Download the report](sandbox:/mnt/data/report.csv)',
             annotations: [
               {
                 type: 'citation',
@@ -745,9 +770,30 @@ describe('OpenAI Responses output attachments', () => {
           run_id: 'reply',
           thread_id: 'conversation',
           langgraph_node: 'agent=native',
+          ...visibility,
         },
         graph,
       );
+      expect(collectedUsage).toEqual([
+        expect.objectContaining({
+          input_tokens: 10,
+          output_tokens: 2,
+          total_tokens: 12,
+          ...(visible ? {} : { usage_type: 'sequential' }),
+        }),
+      ]);
+      if (!visible) {
+        expect(fetch).not.toHaveBeenCalled();
+        expect(createFile).not.toHaveBeenCalled();
+        expect(artifactPromises).toEqual([]);
+        expect(res.write).not.toHaveBeenCalled();
+        expect(
+          GenerationJobManager.emitChunk.mock.calls.filter(
+            ([, event]) => event.event === 'attachment',
+          ),
+        ).toHaveLength(0);
+        return;
+      }
       const [file] = await Promise.all(artifactPromises);
       expect(file).toMatchObject({
         filename: 'report.csv',

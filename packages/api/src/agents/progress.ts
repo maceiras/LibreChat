@@ -23,6 +23,8 @@ type TerminalStatus = Exclude<ResponseProgress['status'], 'running'>;
 
 export interface ResponseProgressTracker {
   stage: (value: ResponseStage) => Promise<void>;
+  /** Record a recoverable file failure without ending the response's remaining work. */
+  markIncomplete: () => void;
   finish: (status: TerminalStatus) => Promise<void>;
   snapshot: () => ResponseProgress | undefined;
   bind: (id: string, signal: AbortSignal) => void;
@@ -75,8 +77,10 @@ export function createResponseProgress(
   now: () => number = Date.now,
 ): ResponseProgressTracker {
   let messageId = '';
+  let incomplete = false;
   let state: ResponseProgress | undefined;
   let pending = Promise.resolve();
+  let abortSignal: AbortSignal | undefined;
   let removeAbortListener: (() => void) | undefined;
   const publish = () => {
     if (!state) return pending;
@@ -91,11 +95,15 @@ export function createResponseProgress(
   const finish = (status: Exclude<ResponseProgress['status'], 'running'>) => {
     removeAbortListener?.();
     if (!state || state.status !== 'running') return pending;
-    state = finishSnapshot(state, status, now());
+    state = finishSnapshot(
+      state,
+      status === 'completed' && incomplete ? 'incomplete' : status,
+      now(),
+    );
     return publish();
   };
   const stage = (value: ResponseStage) => {
-    if (!messageId || (state && state.status !== 'running')) return pending;
+    if (!messageId || abortSignal?.aborted || (state && state.status !== 'running')) return pending;
     if (state?.steps[state.steps.length - 1]?.stage === value) return pending;
     const time = Math.max(now(), state?.updatedAt ?? 0);
     const steps =
@@ -113,10 +121,16 @@ export function createResponseProgress(
   return {
     stage,
     finish,
+    markIncomplete() {
+      if (state && state.status !== 'running') return;
+      incomplete = true;
+    },
     snapshot: () => state,
     bind(id: string, signal: AbortSignal) {
       removeAbortListener?.();
       messageId = id;
+      abortSignal = signal;
+      if (signal.aborted) return;
       const onAbort = () => {
         void finish('cancelled');
       };

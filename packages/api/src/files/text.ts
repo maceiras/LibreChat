@@ -2,9 +2,9 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { createReadStream } from 'fs';
 import { logger } from '@librechat/data-schemas';
-import { FileSources } from 'librechat-data-provider';
+import { FileSources, inferMimeType } from 'librechat-data-provider';
 import type { ServerRequest } from '~/types';
-import { logAxiosError, readFileAsString } from '~/utils';
+import { logAxiosError } from '~/utils';
 import { generateShortLivedToken } from '~/crypto/jwt';
 
 const MARKDOWN_MIME_TYPES = new Set([
@@ -16,6 +16,28 @@ const MARKDOWN_MIME_TYPES = new Set([
 ]);
 
 const MARKDOWN_EXTENSIONS_RE = /\.(md|markdown|mdown|mkdn|mkd|mdwn)$/i;
+
+const APPLICATION_TEXT_MIME_TYPES = new Set([
+  ...MARKDOWN_MIME_TYPES,
+  'application/csv',
+  'application/ecmascript',
+  'application/javascript',
+  'application/sql',
+  'application/toml',
+  'application/typescript',
+  'application/vnd.coffeescript',
+  'application/x-httpd-php',
+  'application/x-javascript',
+  'application/x-sh',
+  'application/x-shellscript',
+  'application/x-toml',
+  'application/x-yaml',
+  'application/yaml',
+  'image/svg',
+  'image/svg+xml',
+]);
+
+const BINARY_CONTROL_CHARACTERS = /(?![\t\n\r\f\v])\p{Cc}/u;
 
 function normalizeMimeType(mimetype: string): string {
   if (!mimetype) {
@@ -31,6 +53,35 @@ function isMarkdownFile(file: Express.Multer.File): boolean {
     return true;
   }
   return MARKDOWN_EXTENSIONS_RE.test(file.originalname ?? '');
+}
+
+function isPlainTextMimeType(mimetype: string): boolean {
+  return (
+    (mimetype.startsWith('text/') && mimetype !== 'text/rtf') ||
+    APPLICATION_TEXT_MIME_TYPES.has(mimetype) ||
+    /^application\/(?:[\w.+-]+\+)?(?:json|xml)$/.test(mimetype)
+  );
+}
+
+function supportsNativeText(file: Express.Multer.File): boolean {
+  const inferredType = inferMimeType(file.originalname, '');
+  if (inferredType && !isPlainTextMimeType(inferredType)) {
+    return false;
+  }
+  const mimetype = normalizeMimeType(file.mimetype);
+  if (!mimetype || mimetype === 'application/octet-stream') {
+    return !inferredType || isPlainTextMimeType(inferredType);
+  }
+  return isPlainTextMimeType(mimetype);
+}
+
+function extractionError(file: Express.Multer.File): Error {
+  return new Error(
+    `Unable to extract text from "${file.originalname}". ` +
+      'No compatible text extractor succeeded for this file. ' +
+      'Convert it to a PDF containing selectable text or a UTF-8 TXT file, ' +
+      'or use a model that supports this format directly.',
+  );
 }
 
 /**
@@ -104,8 +155,12 @@ export async function parseText({
     const responseData = response.data;
     logger.debug(`[parseText] RAG API completed successfully (${response.status})`);
 
-    if (!('text' in responseData)) {
-      throw new Error('RAG API did not return parsed text');
+    if (
+      typeof responseData?.text !== 'string' ||
+      BINARY_CONTROL_CHARACTERS.test(responseData.text) ||
+      (!responseData.text.trim() && !supportsNativeText(file))
+    ) {
+      throw new Error('RAG API did not return readable text');
     }
 
     return {
@@ -123,8 +178,8 @@ export async function parseText({
 }
 
 /**
- * Native JavaScript text parsing fallback
- * Simple text file reading - complex formats handled by RAG API
+ * Read only text formats with strict UTF-8 decoding, including across chunk boundaries.
+ * Binary documents require a successful specialized extractor instead of this fallback.
  * @param file - The uploaded file
  * @returns
  */
@@ -133,12 +188,38 @@ export async function parseTextNative(file: Express.Multer.File): Promise<{
   bytes: number;
   source: string;
 }> {
-  const { content: text, bytes } = await readFileAsString(file.path, {
-    fileSize: file.size,
-  });
+  if (!supportsNativeText(file)) {
+    throw extractionError(file);
+  }
+
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  const chunks: string[] = [];
+  let bytes = 0;
+  const decode = (chunk?: Buffer): string => {
+    let text: string;
+    try {
+      text = decoder.decode(chunk, { stream: chunk != null });
+    } catch {
+      throw extractionError(file);
+    }
+    if (BINARY_CONTROL_CHARACTERS.test(text)) {
+      throw extractionError(file);
+    }
+    return text;
+  };
+
+  for await (const chunk of createReadStream(file.path) as AsyncIterable<Buffer>) {
+    const text = decode(chunk);
+    if (bytes === 0 && /^(?:\uFEFF)?(?:%PDF-|\{\\rtf)/.test(text)) {
+      throw extractionError(file);
+    }
+    chunks.push(text);
+    bytes += chunk.length;
+  }
+  chunks.push(decode());
 
   return {
-    text,
+    text: chunks.join(''),
     bytes,
     source: FileSources.text,
   };

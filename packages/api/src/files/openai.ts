@@ -46,6 +46,9 @@ const containerCitationSchema = z.union([
 
 type ContainerCitation = z.infer<typeof containerCitationSchema>;
 
+const sandboxDataPrefix = 'sandbox:/mnt/data/';
+const sandboxDataRoot = '/mnt/data/';
+
 interface OpenAIFileHandlerOptions {
   req: ServerRequest;
   handler: EventHandler;
@@ -105,23 +108,337 @@ async function readFileContent(response: Response, limit: number): Promise<Buffe
   }
 }
 
+function normalizeSandboxDataLink(destination: string): string | undefined {
+  if (!destination.startsWith(sandboxDataPrefix)) {
+    return;
+  }
+  const suffixIndex = destination.search(/[?#]/);
+  const withoutSuffix = suffixIndex === -1 ? destination : destination.slice(0, suffixIndex);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(withoutSuffix.slice('sandbox:'.length));
+  } catch {
+    return;
+  }
+  const slashPath = decoded.replace(/\\/g, '/');
+  if (
+    !slashPath.startsWith(sandboxDataRoot) ||
+    slashPath
+      .slice(sandboxDataRoot.length)
+      .split('/')
+      .some((part) => part === '.' || part === '..')
+  ) {
+    return;
+  }
+  const normalized = path.posix.normalize(slashPath);
+  if (!normalized.startsWith(sandboxDataRoot) || normalized === sandboxDataRoot) {
+    return;
+  }
+  return normalized;
+}
+
+function skipCodeFence(text: string, index: number): number | undefined {
+  const marker = text[index];
+  if (marker !== '`' && marker !== '~') {
+    return;
+  }
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+  if (!/^ {0,3}$/.test(text.slice(lineStart, index))) {
+    return;
+  }
+  let markerLength = 0;
+  while (text[index + markerLength] === marker) {
+    markerLength += 1;
+  }
+  if (markerLength < 3) {
+    return;
+  }
+  let nextLine = text.indexOf('\n', index + markerLength);
+  if (nextLine === -1) {
+    return text.length;
+  }
+  nextLine += 1;
+  while (nextLine < text.length) {
+    const lineEnd = text.indexOf('\n', nextLine);
+    const end = lineEnd === -1 ? text.length : lineEnd;
+    const line = text.slice(nextLine, end);
+    const indent = line.match(/^ {0,3}/)?.[0].length ?? 0;
+    let closingLength = 0;
+    while (line[indent + closingLength] === marker) {
+      closingLength += 1;
+    }
+    if (closingLength >= markerLength && line.slice(indent + closingLength).trim() === '') {
+      return lineEnd === -1 ? text.length : lineEnd + 1;
+    }
+    if (lineEnd === -1) {
+      break;
+    }
+    nextLine = lineEnd + 1;
+  }
+  return text.length;
+}
+
+function skipCodeSpan(text: string, index: number): number | undefined {
+  if (text[index] !== '`') {
+    return;
+  }
+  let markerLength = 0;
+  while (text[index + markerLength] === '`') {
+    markerLength += 1;
+  }
+  const marker = '`'.repeat(markerLength);
+  let closing = text.indexOf(marker, index + markerLength);
+  while (closing !== -1) {
+    if (text[closing - 1] !== '`' && text[closing + markerLength] !== '`') {
+      return closing + markerLength;
+    }
+    closing = text.indexOf(marker, closing + markerLength);
+  }
+}
+
+function readMarkdownLink(
+  text: string,
+  index: number,
+): { destination: string; end: number } | undefined {
+  let cursor = index;
+  if (text[cursor] === '!') {
+    cursor += 1;
+  }
+  if (text[cursor] !== '[') {
+    return;
+  }
+  let labelDepth = 1;
+  cursor += 1;
+  while (cursor < text.length && labelDepth > 0) {
+    if (text[cursor] === '\\') {
+      cursor += 2;
+      continue;
+    }
+    const codeEnd = skipCodeSpan(text, cursor);
+    if (codeEnd != null) {
+      cursor = codeEnd;
+      continue;
+    }
+    if (text[cursor] === '[') {
+      labelDepth += 1;
+    } else if (text[cursor] === ']') {
+      labelDepth -= 1;
+    }
+    cursor += 1;
+  }
+  if (labelDepth !== 0 || text[cursor] !== '(') {
+    return;
+  }
+  cursor += 1;
+  while (/\s/.test(text[cursor] ?? '')) {
+    cursor += 1;
+  }
+
+  let destination = '';
+  if (text[cursor] === '<') {
+    cursor += 1;
+    while (cursor < text.length && text[cursor] !== '>') {
+      if (text[cursor] === '\\' && cursor + 1 < text.length) {
+        destination += text[cursor + 1];
+        cursor += 2;
+        continue;
+      }
+      if (text[cursor] === '\n') {
+        return;
+      }
+      destination += text[cursor];
+      cursor += 1;
+    }
+    if (text[cursor] !== '>') {
+      return;
+    }
+    cursor += 1;
+  } else {
+    let nestedParentheses = 0;
+    while (cursor < text.length) {
+      const character = text[cursor];
+      if (character === '\\' && cursor + 1 < text.length) {
+        destination += text[cursor + 1];
+        cursor += 2;
+        continue;
+      }
+      if (character === '(') {
+        nestedParentheses += 1;
+        destination += character;
+        cursor += 1;
+        continue;
+      }
+      if (character === ')') {
+        if (nestedParentheses === 0) {
+          return { destination, end: cursor + 1 };
+        }
+        nestedParentheses -= 1;
+        destination += character;
+        cursor += 1;
+        continue;
+      }
+      if (/\s/.test(character) && nestedParentheses === 0) {
+        break;
+      }
+      destination += character;
+      cursor += 1;
+    }
+  }
+
+  while (/\s/.test(text[cursor] ?? '')) {
+    cursor += 1;
+  }
+  if (text[cursor] === '"' || text[cursor] === "'") {
+    const quote = text[cursor];
+    cursor += 1;
+    while (cursor < text.length && text[cursor] !== quote) {
+      cursor += text[cursor] === '\\' ? 2 : 1;
+    }
+    if (text[cursor] !== quote) {
+      return;
+    }
+    cursor += 1;
+    while (/\s/.test(text[cursor] ?? '')) {
+      cursor += 1;
+    }
+  }
+  if (text[cursor] !== ')') {
+    return;
+  }
+  return { destination, end: cursor + 1 };
+}
+
+function getMarkdownSandboxLinks(text: string): Set<string> {
+  const links = new Set<string>();
+  let cursor = 0;
+  while (cursor < text.length) {
+    if (text[cursor] === '\\') {
+      cursor += 2;
+      continue;
+    }
+    const fenceEnd = skipCodeFence(text, cursor);
+    if (fenceEnd != null) {
+      cursor = fenceEnd;
+      continue;
+    }
+    const codeEnd = skipCodeSpan(text, cursor);
+    if (codeEnd != null) {
+      cursor = codeEnd;
+      continue;
+    }
+    const lineStart = text.lastIndexOf('\n', cursor - 1) + 1;
+    if (/^(?: {4,}|\t)/.test(text.slice(lineStart, cursor))) {
+      cursor = text.indexOf('\n', cursor);
+      if (cursor === -1) {
+        break;
+      }
+      cursor += 1;
+      continue;
+    }
+    const markdownLink = readMarkdownLink(text, cursor);
+    if (!markdownLink) {
+      cursor += 1;
+      continue;
+    }
+    const link = normalizeSandboxDataLink(markdownLink.destination);
+    if (link) {
+      links.add(link);
+    }
+    cursor = markdownLink.end;
+  }
+  return links;
+}
+
+function normalizeCitationPath(filename: string): string | undefined {
+  const slashPath = filename.replace(/\\/g, '/');
+  if (
+    !slashPath.startsWith(sandboxDataRoot) ||
+    slashPath
+      .slice(sandboxDataRoot.length)
+      .split('/')
+      .some((part) => part === '.' || part === '..')
+  ) {
+    return;
+  }
+  const normalized = path.posix.normalize(slashPath);
+  if (!normalized.startsWith(sandboxDataRoot) || normalized === sandboxDataRoot) {
+    return;
+  }
+  return normalized;
+}
+
 function getContainerCitations(output: NonNullable<ModelEndData>['output']): ContainerCitation[] {
   if (!Array.isArray(output?.content)) {
     return [];
   }
   const citations = new Map<string, ContainerCitation>();
+  const linkedPaths = new Set<string>();
   for (const block of output.content) {
-    if (typeof block !== 'object' || !Array.isArray(block.annotations)) {
+    if (typeof block !== 'object') {
       continue;
     }
-    for (const annotation of block.annotations) {
-      const parsed = containerCitationSchema.safeParse(annotation);
-      if (parsed.success) {
-        citations.set(`${parsed.data.container_id}:${parsed.data.file_id}`, parsed.data);
+    if (typeof block.text === 'string') {
+      for (const link of getMarkdownSandboxLinks(block.text)) {
+        linkedPaths.add(link);
+      }
+    }
+    if (Array.isArray(block.annotations)) {
+      for (const annotation of block.annotations) {
+        const parsed = containerCitationSchema.safeParse(annotation);
+        if (parsed.success) {
+          citations.set(`${parsed.data.container_id}:${parsed.data.file_id}`, parsed.data);
+        }
       }
     }
   }
-  return [...citations.values()];
+  if (!linkedPaths.size) {
+    return [];
+  }
+
+  const entries = [...citations.entries()];
+  const citationsByPath = new Map<string, Array<[string, ContainerCitation]>>();
+  for (const entry of entries) {
+    const citationPath = normalizeCitationPath(entry[1].filename);
+    if (!citationPath) {
+      continue;
+    }
+    const matches = citationsByPath.get(citationPath) ?? [];
+    matches.push(entry);
+    citationsByPath.set(citationPath, matches);
+  }
+
+  const selected = new Set<string>();
+  const availableLinkedPathsByBasename = new Map<string, Set<string>>();
+  for (const linkedPath of linkedPaths) {
+    const exactMatches = citationsByPath.get(linkedPath);
+    if (exactMatches?.length === 1) {
+      selected.add(exactMatches[0][0]);
+    }
+    if (exactMatches?.length) {
+      continue;
+    }
+    const basename = path.posix.basename(linkedPath);
+    const matches = availableLinkedPathsByBasename.get(basename) ?? new Set<string>();
+    matches.add(linkedPath);
+    availableLinkedPathsByBasename.set(basename, matches);
+  }
+
+  const bareCitationsByBasename = new Map<string, Array<[string, ContainerCitation]>>();
+  for (const entry of entries) {
+    if (entry[1].filename.includes('/') || entry[1].filename.includes('\\')) {
+      continue;
+    }
+    const matches = bareCitationsByBasename.get(entry[1].filename) ?? [];
+    matches.push(entry);
+    bareCitationsByBasename.set(entry[1].filename, matches);
+  }
+  for (const [basename, matches] of bareCitationsByBasename) {
+    if (matches.length === 1 && availableLinkedPathsByBasename.get(basename)?.size === 1) {
+      selected.add(matches[0][0]);
+    }
+  }
+
+  return entries.filter(([key]) => selected.has(key)).map(([, item]) => item);
 }
 
 /** Persist Responses container outputs before the remote container expires. */
@@ -142,6 +459,20 @@ export function createOpenAIFileHandler({
     async handle(event, data, metadata, graph) {
       await handler.handle(event, data, metadata, graph);
       if (event !== GraphEvents.CHAT_MODEL_END || !graph || !metadata || !user) {
+        return;
+      }
+      /** Match the graph callback visibility rule: hidden intermediate sequential-agent
+       * outputs remain available to the wrapped handler for accounting/state updates, but
+       * must not produce user-visible or persisted attachments. */
+      const lastAgentId = metadata.last_agent_id;
+      const graphNode = metadata.langgraph_node;
+      const isLastAgent =
+        typeof lastAgentId === 'string' &&
+        lastAgentId.length > 0 &&
+        typeof graphNode === 'string' &&
+        graphNode.length > 0 &&
+        graphNode.endsWith(lastAgentId);
+      if (metadata.hide_sequential_outputs === true && !isLastAgent) {
         return;
       }
       const citations = getContainerCitations((data as ModelEndData)?.output);

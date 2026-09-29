@@ -62,11 +62,78 @@ describe('Responses progress', () => {
     ]);
   });
 
+  it('keeps running after file failures and finalizes incomplete only after remaining work', async () => {
+    const { progress, snapshots, advance } = setup();
+    await progress.stage('files');
+    advance(1000);
+    progress.markIncomplete();
+    progress.markIncomplete();
+    expect(progress.snapshot()).toMatchObject({ status: 'running', startedAt: 1000 });
+    expect(progress.snapshot()?.endedAt).toBeUndefined();
+    expect(snapshots).toHaveLength(1);
+
+    advance(30000);
+    await progress.stage('responding');
+    advance(1000);
+    await progress.finish('completed');
+    expect(progress.snapshot()).toMatchObject({
+      status: 'incomplete',
+      startedAt: 1000,
+      endedAt: 33000,
+    });
+    expect(progress.snapshot()?.steps).toEqual([
+      { stage: 'files', startedAt: 1000, endedAt: 32000 },
+      { stage: 'responding', startedAt: 32000, endedAt: 33000 },
+    ]);
+  });
+
+  it('remembers a visible file failure before the primary response starts', async () => {
+    const { progress } = setup();
+    progress.markIncomplete();
+    expect(progress.snapshot()).toBeUndefined();
+    await progress.stage('preparing');
+    await progress.finish('completed');
+    expect(progress.snapshot()?.status).toBe('incomplete');
+  });
+
+  it.each(['failed', 'cancelled'] as const)(
+    'preserves %s over a recoverable file failure',
+    async (status) => {
+      const { progress, advance } = setup();
+      await progress.stage('files');
+      progress.markIncomplete();
+      advance(1000);
+      await progress.finish(status);
+      const final = progress.snapshot();
+      advance(30000);
+      progress.markIncomplete();
+      await progress.finish('completed');
+      expect(progress.snapshot()).toBe(final);
+      expect(final).toMatchObject({ status, endedAt: 2000 });
+    },
+  );
+
+  it('still cancels immediately during remaining downloads after a file failure', async () => {
+    const { progress, controller, advance } = setup();
+    await progress.stage('files');
+    progress.markIncomplete();
+    advance(1000);
+    controller.abort();
+    const stopped = progress.snapshot();
+    advance(30000);
+    await progress.stage('files');
+    progress.markIncomplete();
+    await progress.finish('completed');
+    expect(progress.snapshot()).toBe(stopped);
+    expect(stopped).toMatchObject({ status: 'cancelled', endedAt: 2000 });
+  });
+
   it.each(['response.failed', 'response.incomplete', 'error'])(
     'preserves terminal %s despite cleanup',
     async (event) => {
       const { progress } = setup();
       await progress.stage('preparing');
+      progress.markIncomplete();
       await progress.event(event);
       await progress.stage('files');
       await progress.finish('completed');
@@ -89,6 +156,18 @@ describe('Responses progress', () => {
     expect(progress.snapshot()).toEqual(stopped);
     expect(stopped?.status).toBe('cancelled');
     expect(stopped?.steps).toHaveLength(64);
+  });
+
+  it('does not create progress when the response was already aborted before binding', async () => {
+    const progress = createResponseProgress(jest.fn());
+    const controller = new AbortController();
+    controller.abort();
+
+    progress.bind('message-1', controller.signal);
+    await progress.stage('preparing');
+    await progress.finish('cancelled');
+
+    expect(progress.snapshot()).toBeUndefined();
   });
 
   it('passes split CRLF SSE bytes through unchanged without retaining large data lines', async () => {
@@ -171,6 +250,23 @@ describe('Responses progress', () => {
     );
     expect(progress.snapshot()).toBeUndefined();
     expect(await transport(endpoint, { method: 'POST' })).toBe(response);
+  });
+
+  it.each([
+    { provider: Providers.ANTHROPIC, useResponsesApi: true },
+    { provider: Providers.OPENAI, useResponsesApi: false },
+  ])('does not start early progress for $provider Responses=$useResponsesApi', async (options) => {
+    const progress = createResponseProgress(jest.fn());
+    const agent = {
+      provider: options.provider,
+      model_parameters: { useResponsesApi: options.useResponsesApi },
+    };
+
+    const result = withResponseProgress(agent, progress, 'message-1', new AbortController().signal);
+    await progress.stage('preparing');
+
+    expect(result).toBe(agent);
+    expect(progress.snapshot()).toBeUndefined();
   });
 
   it('observes native events discarded by the real SDK without changing its answer or usage', async () => {
